@@ -27,6 +27,7 @@ workflows:
       - name: Build for iOS Simulator
         script: |
           cd packages/happy-ios
+          set -o pipefail
           xcodebuild build \
             -project Happy.xcodeproj \
             -scheme Happy \
@@ -35,11 +36,16 @@ workflows:
             -derivedDataPath build \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee /tmp/xcodebuild.log || {
+              echo "==================== BUILD ERROR SUMMARY ===================="
+              grep -E "(: error:|fatal error:)" /tmp/xcodebuild.log | head -n 30
+              echo "============================================================="
+              exit 1
+            }
 
     artifacts:
       - packages/happy-ios/build/Build/Products/Debug-iphonesimulator/*.app
-      - /tmp/xcodebuild_logs/*.log
+      - /tmp/xcodebuild.log
 
   happy-ios-release:
     name: Happy iOS - Release IPA (For TestFlight / Physical Devices)
@@ -50,13 +56,6 @@ workflows:
       xcode: latest
       vars:
         HAPPY_RELEASE_WITHOUT_CALL_AGENT: "1"
-        # Optional custom keys:
-        # HAPPY_CALL_AGENT_V3_ID: "agent_xxx"
-        # EXPO_PUBLIC_REVENUE_CAT_APPLE: "appl_xxx"
-
-      # To enable automatic signing with App Store Connect API:
-      # app_store_connect:
-      #   auth: integration
 
     scripts:
       - name: Install XcodeGen
@@ -73,14 +72,10 @@ workflows:
           cd packages/happy-ios
           xcodebuild -resolvePackageDependencies -project Happy.xcodeproj -scheme Happy
 
-      # Uncomment if using App Store Connect automatic signing in Codemagic UI:
-      # - name: Set up code signing
-      #   script: |
-      #     xcode-project use-profiles
-
       - name: Build & Package App
         script: |
           cd packages/happy-ios
+          set -o pipefail
           xcodebuild archive \
             -project Happy.xcodeproj \
             -scheme Happy \
@@ -88,9 +83,14 @@ workflows:
             -archivePath build/Happy.xcarchive \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee /tmp/xcodebuild.log || {
+              echo "==================== BUILD ERROR SUMMARY ===================="
+              grep -E "(: error:|fatal error:)" /tmp/xcodebuild.log | head -n 30
+              echo "============================================================="
+              exit 1
+            }
 
     artifacts:
       - packages/happy-ios/build/Happy.xcarchive
       - build/ios/ipa/*.ipa
-      - /tmp/xcodebuild_logs/*.log
+      - /tmp/xcodebuild.log
