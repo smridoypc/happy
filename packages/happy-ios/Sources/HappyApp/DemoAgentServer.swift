@@ -97,7 +97,7 @@ actor DemoAgentServer: AgentTransport {
 
     private var docSeq = 4
     private var docData: [UInt8] = DemoData.makeDemoDocumentUpdate()
-    private var docUpdates: [[String: JSONValue]] = []
+    private var docUpdates: [JSONValue] = []
 
     private var vaultEntries: [VaultEntry] = []
     private var vaultFilesData: [String: [Int: Data]] = [:]
@@ -219,9 +219,9 @@ actor DemoAgentServer: AgentTransport {
 
         // Seed collaborative document history
         docUpdates = [
-            ["seq": .number(1), "actor": .object(["userId": .string("ridoy"), "agentId": .null]), "source": .string("api"), "createdAt": .number(ago(240)), "size": .number(184)],
-            ["seq": .number(2), "actor": .object(["userId": .null, "agentId": .string("cos-agent")]), "source": .string("tool"), "createdAt": .number(ago(120)), "size": .number(96)],
-            ["seq": .number(3), "actor": .object(["userId": .string("ada"), "agentId": .null]), "source": .string("api"), "createdAt": .number(ago(45)), "size": .number(64)],
+            .object(["seq": .number(1), "actor": .object(["userId": .string("ridoy"), "agentId": .null]), "source": .string("api"), "createdAt": .number(ago(240)), "size": .number(184)]),
+            .object(["seq": .number(2), "actor": .object(["userId": .null, "agentId": .string("cos-agent")]), "source": .string("tool"), "createdAt": .number(ago(120)), "size": .number(96)]),
+            .object(["seq": .number(3), "actor": .object(["userId": .string("ada"), "agentId": .null]), "source": .string("api"), "createdAt": .number(ago(45)), "size": .number(64)]),
         ]
 
         // Seed vault entries
@@ -345,10 +345,14 @@ actor DemoAgentServer: AgentTransport {
         ]
 
         // Seed rich conversations
-        seedConversations(ago: ago)
+        let seeded = Self.makeConversations(ago: ago)
+        conversations = seeded.conversations
+        pendingQuestions = seeded.questions
     }
 
-    private func seedConversations(ago: (Double) -> Double) {
+    private static func makeConversations(ago: (Double) -> Double) -> (conversations: [String: [JSONValue]], questions: [String: JSONValue]) {
+        var conversations: [String: [JSONValue]] = [:]
+        var pendingQuestions: [String: JSONValue] = [:]
         func msg(_ id: String, role: String, at: Double, content: [JSONValue], metadata: [String: JSONValue] = [:]) -> JSONValue {
             .object(["id": .string(id), "role": .string(role), "createdAt": .number(at), "metadata": .object(metadata), "content": .array(content)])
         }
@@ -527,6 +531,7 @@ actor DemoAgentServer: AgentTransport {
         ]
         conversations["local-helper-agent"] = conversations["research-agent"]
         conversations["local-t2-agent"] = conversations["t3-agent"]
+        return (conversations, pendingQuestions)
     }
 
     func browserConnection() async throws -> any BrowserStream {
@@ -1143,13 +1148,13 @@ actor DemoAgentServer: AgentTransport {
         if parts.count == 1 && method == "GET" {
             let scope = URLComponents(string: path)?.queryItems?.first(where: { $0.name == "scope" })?.value ?? "active"
             let filtered = list.filter { $0.status.rawValue == scope }
-            return encodeEncodable(["todos": filtered])
+            return encodeKeyed("todos", filtered)
         }
         if parts.count == 1 && method == "POST" {
             todoCounter += 1
             let id = sent?["id"]?.stringValue ?? "td-\(todoCounter)"
             if let existing = list.first(where: { $0.id == id }) {
-                return encodeEncodable(["todo": existing])
+                return encodeKeyed("todo", existing)
             }
             let item = TodoItem(
                 id: id, surfaceId: surfaceId, authorUserId: "ridoy",
@@ -1159,7 +1164,7 @@ actor DemoAgentServer: AgentTransport {
             list.insert(item, at: 0)
             todos[surfaceId] = list
             emit("todo.created", ["surfaceId": .string(surfaceId), "todoId": .string(id)])
-            return encodeEncodable(["todo": item])
+            return encodeKeyed("todo", item)
         }
         if parts.count >= 2 {
             let todoId = parts[1]
@@ -1184,9 +1189,9 @@ actor DemoAgentServer: AgentTransport {
                 moved = list.first { $0.id == todoId } ?? moved
                 moved.version = "v\(todoCounter)"
                 todos[surfaceId] = list
-                return encodeEncodable(["todo": moved])
+                return encodeKeyed("todo", moved)
             }
-            if method == "GET" { return encodeEncodable(["todo": list[idx]]) }
+            if method == "GET" { return encodeKeyed("todo", list[idx]) }
             if method == "PATCH" {
                 if let text = sent?["text"]?.stringValue { list[idx].text = text }
                 if let statusRaw = sent?["status"]?.stringValue, let status = TodoItem.Status(rawValue: statusRaw) {
@@ -1196,14 +1201,14 @@ actor DemoAgentServer: AgentTransport {
                 list[idx].updatedAt = now
                 list[idx].version = "v\(todoCounter)"
                 todos[surfaceId] = list
-                return encodeEncodable(["todo": list[idx]])
+                return encodeKeyed("todo", list[idx])
             }
             if method == "DELETE" {
                 list[idx].status = .deleted
                 list[idx].deletedAt = now
                 list[idx].version = "v\(todoCounter)"
                 todos[surfaceId] = list
-                return encodeEncodable(["todo": list[idx]])
+                return encodeKeyed("todo", list[idx])
             }
         }
         return jsonResponse(.object(["error": .string("Not found")]), status: 404)
@@ -1238,13 +1243,13 @@ actor DemoAgentServer: AgentTransport {
                 try? doc.applyUpdate(Array(bytes))
                 docData = doc.encodeStateAsUpdate()
                 docSeq += 1
-                docUpdates.append([
+                docUpdates.append(.object([
                     "seq": .number(Double(docSeq)),
                     "actor": .object(["userId": .string("ridoy"), "agentId": .null]),
                     "source": .string("api"),
                     "createdAt": .number(Date().timeIntervalSince1970 * 1000),
                     "size": .number(Double(bytes.count)),
-                ])
+                ]))
                 let framePayload = #"{"surfaceId":"\#(surfaceId)","seq":\#(docSeq),"update":"\#(b64)","mutationId":null,"actor":{"userId":"ridoy","agentId":null},"source":"api"}"#
                 emitNamedFrame(event: "document.update", data: framePayload)
             }
@@ -1264,17 +1269,17 @@ actor DemoAgentServer: AgentTransport {
             let id = "up-\(UUID().uuidString.prefix(8))"
             let size = Int(sent?["size"]?.numberValue ?? 0)
             vaultUploads[id] = (size: size, data: Data())
-            return encodeEncodable(["upload": VaultUpload(id: id, size: size, received: 0, status: "receiving")])
+            return encodeKeyed("upload", VaultUpload(id: id, size: size, received: 0, status: "receiving"))
         }
         if route.hasPrefix("/v0/vault-uploads/") {
             let id = String(route.dropFirst("/v0/vault-uploads/".count))
             if method == "GET", let up = vaultUploads[id] {
-                return encodeEncodable(["upload": VaultUpload(id: id, size: up.size, received: up.data.count, status: up.data.count >= up.size ? "complete" : "receiving")])
+                return encodeKeyed("upload", VaultUpload(id: id, size: up.size, received: up.data.count, status: up.data.count >= up.size ? "complete" : "receiving"))
             }
             if method == "PUT", var up = vaultUploads[id] {
                 if let body { up.data.append(body) }
                 vaultUploads[id] = up
-                return encodeEncodable(["upload": VaultUpload(id: id, size: up.size, received: up.data.count, status: up.data.count >= up.size ? "complete" : "receiving")])
+                return encodeKeyed("upload", VaultUpload(id: id, size: up.size, received: up.data.count, status: up.data.count >= up.size ? "complete" : "receiving"))
             }
             if method == "DELETE" {
                 vaultUploads.removeValue(forKey: id)
@@ -1285,7 +1290,7 @@ actor DemoAgentServer: AgentTransport {
         let rest = String(route.dropFirst("/v0/surfaces/vault/".count))
         let parts = rest.split(separator: "/").map(String.init)
         guard let surfaceId = parts.first else { return jsonResponse(.object([:]), status: 404) }
-        let sub = parts.dropFirst().map(String.init)
+        let sub = Array(parts.dropFirst())
         let now = Date().timeIntervalSince1970 * 1000
 
         if sub == ["items"] && method == "GET" {
@@ -1295,10 +1300,10 @@ actor DemoAgentServer: AgentTransport {
         }
         if sub == ["trash"] && method == "GET" {
             let trashed = vaultEntries.filter { $0.surfaceId == surfaceId && $0.deletedAt != nil }.map { VaultTrashItem(entry: $0, path: "/\($0.name)") }
-            return encodeEncodable(["items": trashed])
+            return encodeKeyed("items", trashed)
         }
         if sub == ["settings"] && method == "GET" {
-            return encodeEncodable(["settings": vaultSettings])
+            return encodeKeyed("settings", vaultSettings)
         }
         if sub == ["settings"] && method == "PATCH" {
             if let rData = try? JSONEncoder().encode(sent?["retention"]), let ret = try? JSONDecoder().decode(VaultRetention.self, from: rData) {
@@ -1306,7 +1311,7 @@ actor DemoAgentServer: AgentTransport {
                 vaultSettings.updatedAt = now
                 vaultSettings.version = "vs-\(Int.random(in: 2...9999))"
             }
-            return encodeEncodable(["settings": vaultSettings])
+            return encodeKeyed("settings", vaultSettings)
         }
         if (sub == ["folders"] || sub == ["files"]) && method == "POST" {
             let isFolder = sub == ["folders"]
@@ -1327,7 +1332,7 @@ actor DemoAgentServer: AgentTransport {
                 vaultFilesData[id] = [1: bytes]
                 vaultVersions[id] = [VaultVersion(entryId: id, surfaceId: surfaceId, number: 1, size: bytes.count, createdAt: now, actor: VaultActor(userId: "ridoy"))]
             }
-            return encodeEncodable([isFolder ? "folder" : "file": entry], status: 201)
+            return encodeKeyed(isFolder ? "folder" : "file", entry, status: 201)
         }
         if sub.count >= 2 && (sub[0] == "folders" || sub[0] == "files") {
             let isFolder = sub[0] == "folders"
@@ -1347,26 +1352,26 @@ actor DemoAgentServer: AgentTransport {
                 if let name = sent?["name"]?.stringValue { vaultEntries[idx].name = name }
                 if let parentVal = sent?["parentId"] { vaultEntries[idx].parentId = parentVal.stringValue }
                 vaultEntries[idx].updatedAt = now
-                return encodeEncodable([key: vaultEntries[idx]])
+                return encodeKeyed(key, vaultEntries[idx])
             }
             if sub.count == 3 && sub[2] == "delete" && method == "POST" {
                 vaultEntries[idx].deletedAt = now
-                return encodeEncodable([key: vaultEntries[idx]])
+                return encodeKeyed(key, vaultEntries[idx])
             }
             if sub.count == 3 && sub[2] == "restore" && method == "POST" {
                 vaultEntries[idx].deletedAt = nil
-                return encodeEncodable([key: vaultEntries[idx]])
+                return encodeKeyed(key, vaultEntries[idx])
             }
             if sub.count == 3 && sub[2] == "versions" && method == "GET" {
-                return encodeEncodable(["versions": vaultVersions[entryId] ?? []])
+                return encodeKeyed("versions", vaultVersions[entryId] ?? [])
             }
             if sub.count == 3 && sub[2] == "activity" && method == "GET" {
-                return encodeEncodable(["activity": [VaultActivity]()])
+                return encodeKeyed("activity", [VaultActivity]())
             }
             if sub.count >= 4 && sub[2] == "versions" {
                 let verNum = sub[3] == "latest" ? (vaultEntries[idx].latestVersion ?? 1) : (Int(sub[3]) ?? 1)
                 if sub.count == 4 && method == "GET", let v = (vaultVersions[entryId] ?? []).first(where: { $0.number == verNum }) {
-                    return encodeEncodable(["version": v])
+                    return encodeKeyed("version", v)
                 }
                 if sub.count == 5 && sub[4] == "content" && method == "GET" {
                     let bytes = vaultFilesData[entryId]?[verNum] ?? Data("Demo file contents\n".utf8)
@@ -1377,7 +1382,7 @@ actor DemoAgentServer: AgentTransport {
                     if let vi = list.firstIndex(where: { $0.number == verNum }) {
                         list[vi].pinned = (sub[4] == "pin")
                         vaultVersions[entryId] = list
-                        return encodeEncodable(["version": list[vi]])
+                        return encodeKeyed("version", list[vi])
                     }
                 }
             }
@@ -1574,8 +1579,8 @@ actor DemoAgentServer: AgentTransport {
         return HTTP1Response(status: status, headers: ["content-type": "application/json"], body: data)
     }
 
-    private func encodeEncodable<T: Encodable>(_ value: [String: T], status: Int = 200) -> HTTP1Response {
-        encodableResponse(value, status: status)
+    private func encodeKeyed<T: Encodable>(_ key: String, _ value: T, status: Int = 200) -> HTTP1Response {
+        encodableResponse([key: value], status: status)
     }
 
     private func encodableResponse<T: Encodable>(_ value: T, status: Int = 200) -> HTTP1Response {
