@@ -768,6 +768,7 @@ final class SidebarList: UIView {
 
     /// A row in a finger's hand: its picture over the list, where the finger
     /// took it, and the rows as they were when it was lifted.
+    @MainActor
     private final class Carry {
         let rowId: String
         let lifted: [Row]
@@ -831,6 +832,7 @@ final class SidebarList: UIView {
         if let move { onReorder?(move) }
         let target = self.view(for: carry.rowId).map { $0.convert($0.box, to: self) } ?? carry.box
         let picture = carry.picture
+        let lifted = carry.lifted
         UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
             picture.transform = .identity
             picture.center = CGPoint(x: target.midX, y: target.midY)
@@ -842,7 +844,7 @@ final class SidebarList: UIView {
             hideCarried()
             // What home sent meanwhile, with the move laid over it until home
             // has it too; else the rows as they were, the row put back.
-            let base = heldRows ?? carry.lifted
+            let base = heldRows ?? lifted
             heldRows = nil
             rows = move.map { SidebarReorder.moved(base, $0) } ?? base
             update()
