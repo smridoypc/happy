@@ -38,14 +38,6 @@ workflows:
       - packages/happy-ios/build/Build/Products/Debug-iphonesimulator/*.app
       - /tmp/xcodebuild_logs/*.log
 
-    publishing:
-      email:
-        recipients:
-          - your-email@example.com
-        notify:
-          on_success: true
-          on_failure: true
-
   happy-ios-release:
     name: Happy iOS - Release IPA (For TestFlight / Physical Devices)
     max_build_duration: 60
@@ -97,12 +89,3 @@ workflows:
       - packages/happy-ios/build/Happy.xcarchive
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
-
-    publishing:
-      email:
-        recipients:
-          - your-email@example.com
-        notify:
-          on_success: true
-          on_failure: true
-
