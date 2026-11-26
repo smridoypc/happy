@@ -367,7 +367,7 @@ enum DemoData {
                 props: ["backgroundColor": .string("default"), "textColor": .string("default"), "textAlignment": .string("left")],
                 content: .inline([
                     DocumentRun("This collaborative document is backed by an "),
-                    DocumentRun("in-memory Yjs YDoc", marks: ["bold": .object([:])]),
+                    DocumentRun("in-memory Yjs YDoc", marks: ["bold": .object([])]),
                     DocumentRun(" so you can edit, indent, toggle checklists, and inspect revision history offline."),
                 ])
             ),
@@ -379,12 +379,12 @@ enum DemoData {
             DocumentBlock(
                 id: "b4", type: "bulletListItem",
                 props: ["backgroundColor": .string("default"), "textColor": .string("default"), "textAlignment": .string("left")],
-                content: .inline([DocumentRun("HappyCore", marks: ["code": .object([:])]), DocumentRun(" — Sync engines, Yjs, Outbox, and Models")])
+                content: .inline([DocumentRun("HappyCore", marks: ["code": .object([])]), DocumentRun(" — Sync engines, Yjs, Outbox, and Models")])
             ),
             DocumentBlock(
                 id: "b5", type: "bulletListItem",
                 props: ["backgroundColor": .string("default"), "textColor": .string("default"), "textAlignment": .string("left")],
-                content: .inline([DocumentRun("HappyLayout", marks: ["code": .object([:])]), DocumentRun(" — Pure geometric frame layout engine")])
+                content: .inline([DocumentRun("HappyLayout", marks: ["code": .object([])]), DocumentRun(" — Pure geometric frame layout engine")])
             ),
             DocumentBlock(
                 id: "b6", type: "checkListItem",
@@ -407,3 +407,4 @@ enum DemoData {
     }
 }
 #endif
+

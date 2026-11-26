@@ -120,7 +120,7 @@ let package = Package(
         ),
         .target(
             name: "HappyApp",
-            dependencies: ["HappyCore", "HappyAnalytics", "HappyStore", "HappyUI", "HappyGuestUI", "HappyGuest"]
+            dependencies: ["HappyCore", "HappyWire", "HappyAnalytics", "HappyStore", "HappyUI", "HappyGuestUI", "HappyGuest"]
         ),
         .testTarget(
             name: "HappyCryptoTests",
