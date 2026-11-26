@@ -1,0 +1,698 @@
+package com.slopus.happy.ui.attach
+
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.EaseInOut
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.min
+import com.slopus.happy.R
+import com.slopus.happy.attachments.AttachTabKind
+import com.slopus.happy.attachments.GalleryItem
+import com.slopus.happy.attachments.RecentFile
+import com.slopus.happy.ui.components.MaterialSymbols
+import com.slopus.happy.ui.components.rememberGlassSource
+import com.slopus.happy.ui.components.glassSource
+import com.slopus.happy.ui.components.rememberReduceMotion
+import com.slopus.happy.ui.layout.ContentTokens
+import com.slopus.happy.ui.theme.HappyTheme
+import com.slopus.happy.ui.theme.happyTextStyle
+import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.math.min
+import kotlin.math.roundToInt
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.center
+import androidx.compose.ui.geometry.lerp
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.foundation.shape.GenericShape
+import androidx.compose.ui.graphics.Paint
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionOnScreen
+import androidx.compose.ui.util.lerp
+import androidx.compose.ui.unit.round
+import androidx.compose.ui.semantics.clearAndSetSemantics
+
+object AttachTags {
+    const val SHEET = "attach.sheet"
+    const val SCRIM = "attach.scrim"
+    const val GRABBER = "attach.grabber"
+    const val HEADER = "attach.header"
+    const val TOP_BAR = "attach.topBar"
+    const val GALLERY = "attach.gallery"
+    const val CELL = "attach.gallery.cell"
+    const val CHECK = "attach.gallery.check"
+    /** The check on the full-screen preview, for the picture in view. */
+    const val PREVIEW_CHECK = "attach.preview.check"
+    const val PREVIEW_FOOT = "attach.preview.foot"
+    const val PREVIEW_CAPTION_BAR = "attach.preview.captionBar"
+    const val PREVIEW_CAPTION = "attach.preview.caption"
+    const val PREVIEW_SEND = "attach.preview.send"
+    const val PREVIEW_CROP = "attach.preview.crop"
+    const val PREVIEW_DRAW = "attach.preview.draw"
+    const val VIDEO_BADGE = "attach.gallery.video"
+    const val ASK = "attach.gallery.ask"
+    const val ALLOW = "attach.gallery.allow"
+    const val PARTIAL = "attach.gallery.partial"
+    const val MANAGE = "attach.gallery.manage"
+    const val EMPTY = "attach.gallery.empty"
+    const val FILES = "attach.files"
+    const val BROWSE = "attach.files.browse"
+    const val FILES_GALLERY = "attach.files.gallery"
+    const val PASTE = "attach.files.paste"
+    const val WORKSPACE = "attach.files.workspace"
+    const val RECENT = "attach.files.recent"
+    const val FILE_ROW = "attach.files.row"
+    const val TAB_BAR = "attach.tabs"
+    const val CAPTION_BAR = "attach.captionBar"
+    const val CAPTION = "attach.caption"
+    const val SEND = "attach.send"
+    const val CONFIRM = "attach.confirm"
+    const val COUNTER = "attach.counter"
+
+    fun tab(kind: AttachTabKind) = "attach.tab." + kind.name.lowercase()
+}
+
+/**
+ * The sheet's motion (research/attachment-menu.md): it comes up on
+ * Telegram's spring as the scrim comes in on its own 400 ms clock, which
+ * the tabs pop on; it goes down by its height and 10 in 250 ms. [drag] is
+ * how far a pull at the list's top (or a predictive back) has moved it.
+ */
+@Stable
+class AttachSheetMotion(settled: Boolean = false) {
+    internal val enter = Animatable(if (settled) 1f else 0f)
+    internal val scrim = Animatable(if (settled) 1f else 0f)
+    internal val clock = Animatable(if (settled) AttachMotion.TABS_MS * 2f else 0f)
+    internal val away = Animatable(0f)
+    internal var drag by mutableFloatStateOf(0f)
+    var closing by mutableStateOf(false)
+        private set
+
+    /** Set by the layout: the window's height and where the sheet's top is now, in px. */
+    internal var height = 0f
+    internal var top: () -> Float = { 0f }
+
+    /**
+     * Growing out of the + ([AttachMorph]): how far the clip's centre, its
+     * size and its corners have gone from the button's to the sheet's, how
+     * much the page and the sheet's ground show, and the + drawn on it.
+     */
+    internal val position = Animatable(1f)
+    internal val size = Animatable(1f)
+    internal val corners = Animatable(1f)
+    internal val content = Animatable(1f)
+    internal val ground = Animatable(1f)
+    internal val glyph = Animatable(0f)
+
+    /** The + it grows out of, when the sheet does. */
+    internal var button by mutableStateOf<AttachButton?>(null)
+        private set
+
+    /** Clipped to the morph's rounded rectangle until it has landed. */
+    internal fun morphed(): Boolean = position.value < 1f || size.value < 1f || corners.value < 1f
+
+    private var morphs = false
+
+    private fun canMorph(reduceMotion: Boolean) = !reduceMotion && button?.screenBounds() != null
+
+    /** The sheet's offset down from where it rests. */
+    internal fun translation(): Float = (1 - enter.value) * height + drag + away.value
+
+    /** Up on Telegram's spring; out of [from] instead where there is one to grow from. */
+    suspend fun open(reduceMotion: Boolean, from: AttachButton? = null) = coroutineScope {
+        button = from
+        morphs = canMorph(reduceMotion)
+        if (morphs) {
+            morphIn()
+            return@coroutineScope
+        }
+        if (reduceMotion) {
+            enter.snapTo(1f)
+            scrim.snapTo(1f)
+            clock.snapTo(AttachMotion.TABS_MS * 2f)
+            return@coroutineScope
+        }
+        launch { enter.animateTo(1f, spring(AttachMotion.OPEN_DAMPING, AttachMotion.OPEN_STIFFNESS, visibilityThreshold = 0.0005f)) }
+        launch {
+            delay(AttachMotion.SCRIM_DELAY_MS.toLong())
+            scrim.animateTo(1f, tween(AttachMotion.SCRIM_MS, easing = AttachMotion.scrim))
+        }
+        launch {
+            delay(AttachMotion.SCRIM_DELAY_MS.toLong())
+            clock.animateTo(AttachMotion.TABS_MS.toFloat(), tween(AttachMotion.TABS_MS, easing = LinearEasing))
+        }
+    }
+
+    /**
+     * iOS `morphIn`: the + is taken (drawn on the sheet, the button hidden)
+     * in one frame, and the motion starts once that frame is on screen.
+     */
+    private suspend fun morphIn() = coroutineScope {
+        enter.snapTo(1f)
+        for (it in listOf(position, size, corners, content, ground)) it.snapTo(0f)
+        glyph.snapTo(1f)
+        button?.hidden = true
+        withFrameNanos {}
+        launch { position.animateTo(1f, AttachMorph.position()) }
+        launch { size.animateTo(1f, AttachMorph.size()) }
+        launch { corners.animateTo(1f, tween(AttachMorph.CORNERS_MS, easing = EaseInOut)) }
+        launch { content.animateTo(1f, tween(AttachMorph.CONTENT_IN_MS, easing = EaseInOut)) }
+        launch { ground.animateTo(1f, tween(AttachMorph.CONTENT_IN_MS, easing = EaseInOut)) }
+        launch { glyph.animateTo(0f, tween(AttachMorph.GLYPH_IN_MS, easing = EaseInOut)) }
+        launch {
+            delay(AttachMotion.SCRIM_DELAY_MS.toLong())
+            scrim.animateTo(1f, tween(AttachMotion.SCRIM_MS, easing = AttachMotion.scrim))
+        }
+        launch {
+            delay(AttachMotion.SCRIM_DELAY_MS.toLong())
+            clock.animateTo(AttachMotion.TABS_MS.toFloat(), tween(AttachMotion.TABS_MS, easing = LinearEasing))
+        }
+    }
+
+    /** iOS `morphOut`: back into the + from wherever it is, a pull's drop too, and the button given back once there. */
+    private suspend fun morphOut() = coroutineScope {
+        val ease = tween<Float>(AttachMotion.CLOSE_MS, easing = EaseInOut)
+        launch { scrim.animateTo(0f, ease) }
+        launch { position.animateTo(0f, AttachMorph.position()) }
+        launch { size.animateTo(0f, AttachMorph.outSize()) }
+        launch { corners.animateTo(0f, tween(AttachMorph.CORNERS_MS, easing = EaseInOut)) }
+        launch { content.animateTo(0f, tween(AttachMorph.CONTENT_OUT_MS, easing = EaseInOut)) }
+        launch { glyph.animateTo(1f, tween(AttachMorph.GLYPH_OUT_MS, easing = EaseInOut)) }
+        launch { ground.animateTo(0f, tween(AttachMorph.GROUND_OUT_MS, AttachMorph.GROUND_OUT_DELAY_MS, EaseInOut)) }
+    }
+
+    /** The + back, once the sheet has gone (or never came). */
+    internal fun giveBack() {
+        button?.hidden = false
+    }
+
+    /** Down past the window's foot, the scrim out with it; into the + where it came from one. */
+    suspend fun close(extra: Float, reduceMotion: Boolean) = coroutineScope {
+        closing = true
+        if (morphs && canMorph(reduceMotion)) {
+            morphOut()
+            return@coroutineScope
+        }
+        val distance = (height - (top() + drag)) + extra
+        val spec = if (reduceMotion) snap() else tween<Float>(AttachMotion.CLOSE_MS, easing = AttachMotion.easeOut)
+        launch { away.animateTo(distance.coerceAtLeast(0f), spec) }
+        launch { scrim.animateTo(0f, spec) }
+    }
+
+    /** Let go short of [threshold]: back home in 250 ms for a full one, less for less. */
+    internal suspend fun springBack(threshold: Float) {
+        val ms = AttachMotion.springBackMs(drag, threshold)
+        animate(drag, 0f, animationSpec = tween(ms, easing = AttachMotion.default)) { value, _ -> drag = value }
+    }
+}
+
+/**
+ * Telegram's attachment sheet as one window-filling layout (the Dialog
+ * is [AttachSheet]'s): the 0.2 scrim, and the sheet, at most
+ * [ContentTokens.sheetMaxWidth] wide and centred. The sheet is its list:
+ * the grid (or the file list) fills it, its top padding the empty space
+ * above, so its first row rests at 2/5 of the height and scrolling it up
+ * raises the sheet's top until it meets the top bar, where the corners go
+ * square. A pull down at the list's top moves the sheet, and it goes once
+ * pulled 0.8 cm. The tab bar floats at its foot on glass, and gives way to
+ * the caption bar once something is picked, whose Send sends the picks
+ * with the caption. The header's far end then holds the confirm pill (a
+ * check and the count), which puts them in the composer instead.
+ */
+@Composable
+internal fun AttachSheetLayout(
+    tabs: List<AttachTabKind>,
+    tab: AttachTabKind,
+    onTab: (AttachTabKind) -> Unit,
+    gallery: GalleryContent,
+    sources: FileSources,
+    recent: List<RecentFile>,
+    selection: AttachSelection,
+    caption: String,
+    onCaptionChange: (String) -> Unit,
+    motion: AttachSheetMotion,
+    onClose: () -> Unit,
+    onSend: () -> Unit,
+    onConfirm: () -> Unit,
+    onToggleGallery: (GalleryItem) -> Unit,
+    onOpenGallery: (GalleryItem) -> Unit,
+    onToggleFile: (RecentFile) -> Unit,
+    onAllow: () -> Unit,
+    onManage: () -> Unit,
+    onBrowse: () -> Unit,
+    onFilesGallery: () -> Unit,
+    onPaste: () -> Unit,
+    modifier: Modifier = Modifier,
+    onWorkspace: () -> Unit = {},
+    sending: Boolean = false,
+    busy: Boolean = false,
+    galleryState: LazyGridState = rememberLazyGridState(),
+    filesState: LazyListState = rememberLazyListState(),
+    camera: AttachCameraState? = null,
+) {
+    val theme = HappyTheme.colors
+    val colors = remember(theme.dark) { AttachColors.of(theme.dark) }
+    val sheetColor = theme.surface
+    val density = LocalDensity.current
+    val reduceMotion = rememberReduceMotion()
+    val statusBar = WindowInsets.statusBars.getTop(density).toFloat()
+    val bottomInsets = WindowInsets.ime.union(WindowInsets.navigationBars)
+    val bottom = bottomInsets.asPaddingValues().calculateBottomPadding()
+    val dismissAt = LocalContext.current.resources.displayMetrics.xdpi / 2.54f * AttachSpec.DISMISS_CM
+
+    var root by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    BoxWithConstraints(modifier.fillMaxSize().onPlaced { root = it }) {
+        val height = constraints.maxHeight.toFloat()
+        val sheetWidth = min(maxWidth, ContentTokens.sheetMaxWidth)
+        val landscape = maxWidth > maxHeight
+        val columns = AttachSpec.columns(sheetWidth)
+        val rest = with(density) {
+            statusBar + (height - statusBar) * (if (landscape) AttachSpec.RESTING_LANDSCAPE else AttachSpec.RESTING) + AttachSpec.restingNudge.toPx()
+        }
+        val restDp = with(density) { rest.toDp() }
+        val listPadding = PaddingValues(
+            start = AttachSpec.gridPadding,
+            end = AttachSpec.gridPadding,
+            top = restDp,
+            bottom = AttachSpec.tabBar + bottom,
+        )
+
+        // Picked: the header comes in and the sheet grows 26 at its top.
+        val picked = selection.count > 0
+        val headerProgress by animateFloatAsState(
+            if (picked) 1f else 0f,
+            if (reduceMotion) snap() else tween(AttachMotion.HEADER_MS, easing = AttachMotion.decelerate),
+            label = "header",
+        )
+        val captionProgress = remember { Animatable(if (picked) 1f else 0f) }
+        LaunchedEffect(picked) {
+            captionProgress.animateTo(if (picked) 1f else 0f, if (reduceMotion) snap() else tween(AttachMotion.CAPTION_MS, easing = AttachMotion.decelerate))
+        }
+
+        // Tabs: the old page goes down 78 and out, the new one comes in and springs home.
+        var current by remember { mutableStateOf(tab) }
+        var leaving by remember { mutableStateOf<AttachTabKind?>(null) }
+        val phase = remember { Animatable(1f) }
+        val settle = remember { Animatable(0f) }
+        val switchShift = with(density) { AttachSpec.switchShift.toPx() }
+        LaunchedEffect(tab) {
+            if (tab == current) return@LaunchedEffect
+            if (reduceMotion) {
+                current = tab
+                return@LaunchedEffect
+            }
+            leaving = current
+            current = tab
+            settle.snapTo(0f)
+            phase.snapTo(0f)
+            phase.animateTo(1f, tween(AttachMotion.SWITCH_MS, easing = AttachMotion.default))
+            leaving = null
+            settle.snapTo(switchShift)
+            settle.animateTo(0f, spring(AttachMotion.SWITCH_DAMPING, AttachMotion.SWITCH_STIFFNESS))
+        }
+
+        fun firstRow(kind: AttachTabKind): Float {
+            val (index, offset) = when (kind) {
+                AttachTabKind.Gallery -> galleryState.layoutInfo.visibleItemsInfo.firstOrNull()?.let { it.index to it.offset.y }
+                AttachTabKind.Files -> filesState.layoutInfo.visibleItemsInfo.firstOrNull()?.let { it.index to it.offset }
+            } ?: (0 to 0)
+            return if (index == 0) rest + offset else Float.NEGATIVE_INFINITY
+        }
+        val over = with(density) { AttachSpec.sheetOverRow.toPx() }
+        val headerPx = with(density) { AttachSpec.header.toPx() }
+        val reach = with(density) { (AttachSpec.topBar + AttachSpec.topBarReach).toPx() }
+        fun rawTop(): Float {
+            val now = firstRow(current) - over - headerPx * headerProgress
+            val old = leaving ?: return now
+            val before = firstRow(old) - over - headerPx * headerProgress
+            val p = phase.value
+            return before.coerceAtLeast(0f) + (now.coerceAtLeast(0f) - before.coerceAtLeast(0f)) * p
+        }
+        val expanded by remember { derivedStateOf { firstRow(current) <= statusBar + reach } }
+        val topBar by animateFloatAsState(
+            if (expanded) 1f else 0f,
+            if (reduceMotion) snap() else tween(AttachMotion.TOP_BAR_MS),
+            label = "top bar",
+        )
+        fun sheetTop(): Float {
+            val raw = rawTop()
+            val floor = raw.coerceAtLeast(0f)
+            return min(raw, floor * (1 - topBar)).coerceAtLeast(0f)
+        }
+        SideEffect {
+            motion.height = height
+            motion.top = ::sheetTop
+            camera?.viewportTop = { (statusBar + with(density) { AttachSpec.topBar.toPx() }) * topBar }
+        }
+
+        val connection = remember(dismissAt) {
+            object : NestedScrollConnection {
+                override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                    if (available.y < 0 && motion.drag > 0) {
+                        val take = min(motion.drag, -available.y)
+                        motion.drag -= take
+                        return Offset(0f, -take)
+                    }
+                    return Offset.Zero
+                }
+
+                override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                    if (source == NestedScrollSource.UserInput && available.y > 0 && !motion.closing) {
+                        motion.drag += available.y
+                        return Offset(0f, available.y)
+                    }
+                    return Offset.Zero
+                }
+
+                override suspend fun onPreFling(available: Velocity): Velocity {
+                    if (motion.drag <= 0f) return Velocity.Zero
+                    if (motion.drag >= dismissAt) onClose() else motion.springBack(dismissAt)
+                    return available
+                }
+            }
+        }
+
+        // The scrim: a tap on it closes.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .drawBehind { drawRect(Color.Black.copy(alpha = (AttachSpec.SCRIM_ALPHA * motion.scrim.value).coerceIn(0f, 1f))) }
+                .pointerInput(Unit) { detectTapGestures { onClose() } }
+                .testTag(AttachTags.SCRIM),
+        )
+
+        val corner = with(density) { AttachSpec.corner.toPx() }
+        val sheetLeft = with(density) { (maxWidth - sheetWidth).toPx() / 2 }
+
+        /** The + in this window, if the sheet grows out of one. */
+        fun buttonRect(): Rect? {
+            val on = motion.button?.screenBounds() ?: return null
+            val here = root?.takeIf { it.isAttached }?.positionOnScreen() ?: return null
+            return on.translate(-here)
+        }
+
+        /** The morph's clip in the window: from the +'s circle to the sheet as it rests. */
+        fun morphRect(button: Rect): RoundRect {
+            val top = sheetTop() + motion.translation()
+            val sheet = Rect(sheetLeft, top, sheetLeft + with(density) { sheetWidth.toPx() }, height + motion.translation())
+            val center = lerp(button.center, sheet.center, motion.position.value)
+            val w = lerp(button.width, sheet.width, motion.size.value)
+            val h = lerp(button.height, sheet.height, motion.size.value)
+            val round = button.height / 2
+            val topRadius = CornerRadius(lerp(round, corner * (1 - topBar), motion.corners.value))
+            val footRadius = CornerRadius(lerp(round, 0f, motion.corners.value))
+            return RoundRect(center.x - w / 2, center.y - h / 2, center.x + w / 2, center.y + h / 2, topRadius, topRadius, footRadius, footRadius)
+        }
+        val source = rememberGlassSource(sheetColor)
+        Box(
+            Modifier
+                .align(Alignment.TopCenter)
+                .width(sheetWidth)
+                .fillMaxHeight()
+                .graphicsLayer {
+                    translationY = motion.translation()
+                    val button = if (motion.morphed()) buttonRect() else null
+                    clip = button != null
+                    shape = if (button == null) RectangleShape else {
+                        // In the sheet's own space: the window's less where the sheet stands and has moved to.
+                        val rect = morphRect(button).let { it.copy(left = it.left - sheetLeft, right = it.right - sheetLeft, top = it.top - translationY, bottom = it.bottom - translationY) }
+                        GenericShape { _, _ -> addRoundRect(rect) }
+                    }
+                }
+                .pointerInput(Unit) {
+                    // Over the sheet's top, where the list is empty, a tap closes too.
+                    detectTapGestures { if (it.y < sheetTop() && topBar == 0f) onClose() }
+                }
+                .drawBehind {
+                    val top = sheetTop()
+                    val radius = corner * (1 - topBar)
+                    val path = Path().apply {
+                        addRoundRect(
+                            RoundRect(
+                                left = 0f,
+                                top = top,
+                                right = size.width,
+                                // Past the foot, so the spring's overshoot shows sheet, not window.
+                                bottom = size.height * 2,
+                                topLeftCornerRadius = CornerRadius(radius),
+                                topRightCornerRadius = CornerRadius(radius),
+                            ),
+                        )
+                    }
+                    drawPath(path, sheetColor, alpha = motion.ground.value)
+                }
+                .drawWithContent {
+                    // The page fades in over the growing glass, and off it on the way back.
+                    val shown = motion.content.value
+                    if (shown >= 1f) return@drawWithContent drawContent()
+                    if (shown <= 0f) return@drawWithContent
+                    drawIntoCanvas { canvas ->
+                        canvas.saveLayer(Rect(Offset.Zero, size), Paint().apply { alpha = shown })
+                        drawContent()
+                        canvas.restore()
+                    }
+                }
+                .nestedScroll(connection)
+                .testTag(AttachTags.SHEET),
+        ) {
+            Box(Modifier.fillMaxSize().glassSource(source)) {
+                @Composable
+                fun Page(kind: AttachTabKind, pageModifier: Modifier) {
+                    when (kind) {
+                        AttachTabKind.Gallery -> AttachGalleryPage(
+                            gallery, selection, columns, listPadding, galleryState, sheetColor, colors,
+                            onToggle = onToggleGallery, onOpen = onOpenGallery, onAllow = onAllow, onManage = onManage, modifier = pageModifier,
+                            camera = camera,
+                        )
+                        AttachTabKind.Files -> AttachFilesPage(
+                            sources, recent, selection,
+                            PaddingValues(top = restDp, bottom = AttachSpec.tabBar + bottom),
+                            filesState, sheetColor, colors,
+                            onBrowse = onBrowse, onGallery = onFilesGallery, onPaste = onPaste, onToggle = onToggleFile, modifier = pageModifier,
+                            onWorkspace = onWorkspace,
+                        )
+                    }
+                }
+                leaving?.let { old ->
+                    Page(old, Modifier.graphicsLayer {
+                        translationY = switchShift * phase.value
+                        alpha = 1 - (phase.value / AttachMotion.SWITCH_FADE).coerceAtMost(1f)
+                    })
+                }
+                Page(current, Modifier.graphicsLayer {
+                    translationY = if (leaving != null) switchShift * phase.value else settle.value
+                    alpha = if (leaving != null) phase.value else 1f
+                })
+            }
+
+            // The grabber, giving way to the header as something is picked.
+            Box(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .offset { IntOffset(0, (sheetTop() + AttachSpec.grabberTop.toPx()).roundToInt()) }
+                    .size(AttachSpec.grabberWidth, AttachSpec.grabberHeight)
+                    .graphicsLayer { alpha = (1 - headerProgress) * (1 - topBar) }
+                    .background(colors.grabber, RoundedCornerShape(AttachSpec.grabberHeight / 2))
+                    .testTag(AttachTags.GRABBER),
+            )
+            if (selection.count > 0 || headerProgress > 0f) {
+                SelectedHeader(
+                    selection.count.coerceAtLeast(1),
+                    Modifier
+                        .offset { IntOffset(23.dp.roundToPx(), (sheetTop() + 15.dp.toPx()).roundToInt()) }
+                        .graphicsLayer { alpha = headerProgress * (1 - topBar) },
+                )
+            }
+
+            // At the top: the bar over the status bar, Back and the tab's name.
+            if (topBar > 0f) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer { alpha = topBar }
+                        .background(sheetColor)
+                        .padding(top = with(density) { statusBar.toDp() })
+                        .height(AttachSpec.topBar)
+                        .testTag(AttachTags.TOP_BAR),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onClose) {
+                        Icon(MaterialSymbols.ArrowBack, stringResource(R.string.common_back), tint = theme.text)
+                    }
+                    Text(
+                        if (selection.count > 0) pluralSelected(selection.count) else stringResource(tabTitle(current)),
+                        style = happyTextStyle(20, weight = FontWeight.SemiBold),
+                        color = theme.text,
+                        maxLines = 1,
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
+                }
+            }
+
+            // The header's far end, over the top bar once it is in: the picks into the composer, unsent.
+            if (selection.count > 0 || headerProgress > 0f) {
+                ConfirmPill(
+                    selection.count.coerceAtLeast(1),
+                    busy = busy,
+                    enabled = !sending,
+                    colors = colors,
+                    onConfirm = onConfirm,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset {
+                            val resting = sheetTop() + AttachSpec.confirmTop.toPx()
+                            val barred = statusBar + (AttachSpec.topBar - AttachSpec.confirmHeight).toPx() / 2
+                            IntOffset(-AttachSpec.confirmEnd.roundToPx(), (resting + (barred - resting) * topBar).roundToInt())
+                        }
+                        .graphicsLayer {
+                            val scale = AttachSpec.CONFIRM_FROM + (1 - AttachSpec.CONFIRM_FROM) * headerProgress
+                            scaleX = scale
+                            scaleY = scale
+                            alpha = headerProgress
+                        },
+                )
+            }
+
+            // The foot: the list fades under the bars.
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(AttachSpec.bottomFade + bottom)
+                    .background(Brush.verticalGradient(0f to sheetColor.copy(alpha = 0f), 0.6f to sheetColor.copy(alpha = 0.85f), 1f to sheetColor)),
+            )
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(bottom = bottom)
+                    // The live camera tile stops at the bar's top, never over the caption.
+                    .onGloballyPositioned { bar -> camera?.footTop = root?.takeIf { it.isAttached }?.localPositionOf(bar, Offset.Zero)?.y },
+            ) {
+                if (captionProgress.value < 1f) {
+                    AttachTabBar(
+                        tabs,
+                        current,
+                        onTab,
+                        openElapsed = { motion.clock.value },
+                        backdrop = source,
+                        colors = colors,
+                        modifier = Modifier.graphicsLayer {
+                            val p = captionProgress.value
+                            translationY = AttachSpec.captionShift.toPx() * p
+                            alpha = 1 - p
+                        },
+                    )
+                }
+                if (captionProgress.value > 0f) {
+                    AttachCaptionBar(
+                        caption,
+                        onCaptionChange,
+                        selection.count,
+                        onSend,
+                        sending = sending,
+                        shown = { captionProgress.value },
+                        backdrop = source,
+                        colors = colors,
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    )
+                }
+            }
+        }
+
+        // The + on the morph's glass, at its centre, the button's own size.
+        val button = motion.button
+        if (button != null && motion.glyph.value > 0f) {
+            val at = buttonRect()
+            if (at != null) {
+                Box(
+                    Modifier
+                        .offset { (morphRect(at).center - at.size.center).round() }
+                        .size(with(density) { at.width.toDp() }, with(density) { at.height.toDp() })
+                        .graphicsLayer { alpha = motion.glyph.value }
+                        .clearAndSetSemantics {},
+                    contentAlignment = Alignment.Center,
+                ) { button.glyph() }
+            }
+        }
+    }
+}
+
+@Composable
+private fun pluralSelected(count: Int): String =
+    androidx.compose.ui.res.pluralStringResource(R.plurals.attach_selected, count, count)
+
+internal fun tabTitle(kind: AttachTabKind): Int = when (kind) {
+    AttachTabKind.Gallery -> R.string.attach_tab_gallery
+    AttachTabKind.Files -> R.string.attach_tab_files
+}

@@ -1,0 +1,387 @@
+package com.slopus.happy.ui.attach
+
+import android.graphics.Bitmap
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.click
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.height
+import androidx.compose.ui.unit.width
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.slopus.happy.attachments.AttachTabKind
+import com.slopus.happy.attachments.GalleryAccess
+import com.slopus.happy.attachments.GalleryItem
+import com.slopus.happy.attachments.RecentFile
+import com.slopus.happy.ui.PHONE
+import com.slopus.happy.ui.assertDp
+import com.slopus.happy.ui.bounds
+import com.slopus.happy.ui.node
+import com.slopus.happy.ui.setHappyContent
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+import java.io.File
+
+/** A phone's gallery for the sheet: a video every fourth item. */
+internal fun fakeGallery(count: Int = 30) = (0 until count).map { i ->
+    val video = i % 4 == 1
+    GalleryItem(
+        id = i.toLong(),
+        uri = "content://media/external/${if (video) "video" else "images"}/media/$i",
+        isVideo = video,
+        mimeType = if (video) "video/mp4" else "image/jpeg",
+        name = "IMG_$i.jpg",
+        size = 1000,
+        width = 4000,
+        height = 3000,
+        durationMs = if (video) 7_000L + i * 1000 else 0,
+    )
+}
+
+internal val fakeRecent = listOf(
+    RecentFile("file:///sdcard/Report.pdf", "Report.pdf", "application/pdf", 482_000, 1_700_000_000_000),
+    RecentFile("file:///sdcard/budget.csv", "budget.csv", "text/csv", 12_000, 1_699_000_000_000),
+    RecentFile("file:///sdcard/notes.txt", "notes.txt", "text/plain", 900, 1_698_000_000_000),
+)
+
+/** The sheet as it rests once open, picks made through its own checks. */
+@Composable
+internal fun SheetUnderTest(
+    content: GalleryContent = GalleryContent(GalleryAccess.Full, fakeGallery(), loaded = true),
+    selection: AttachSelection = remember { AttachSelection(20) },
+    startTab: AttachTabKind = AttachTabKind.Gallery,
+    onClose: () -> Unit = {},
+    motion: AttachSheetMotion = remember { AttachSheetMotion(settled = true) },
+    camera: AttachCameraState? = null,
+    onOpen: (GalleryItem) -> Unit = {},
+) {
+    var tab by remember { mutableStateOf(startTab) }
+    var caption by remember { mutableStateOf("") }
+    AttachSheetLayout(
+        tabs = listOf(AttachTabKind.Gallery, AttachTabKind.Files),
+        tab = tab,
+        onTab = { tab = it },
+        gallery = content,
+        sources = FileSources(),
+        recent = fakeRecent,
+        selection = selection,
+        caption = caption,
+        onCaptionChange = { caption = it },
+        motion = motion,
+        onClose = onClose,
+        onSend = {},
+        onConfirm = {},
+        onToggleGallery = { selection.toggle(it.picked()) },
+        onOpenGallery = onOpen,
+        onToggleFile = { selection.toggle(it.picked()) },
+        onAllow = {},
+        onManage = {},
+        onBrowse = {},
+        onFilesGallery = {},
+        onPaste = {},
+        camera = camera,
+    )
+}
+
+/**
+ * Telegram's sheet on a phone (411 × 891): the first row resting at 2/5,
+ * three square columns 2 apart and 2 in, the check in each cell's 42
+ * corner, the 70 tab bar at the foot; picking numbers the checks in order,
+ * brings in the header and the caption bar with its count, and a pull at
+ * the list's top of 0.8 cm closes it. With HAPPY_SHOTS_DIR set, its states
+ * are written there as `attach-<state>-<theme>.png`.
+ */
+@RunWith(AndroidJUnit4::class)
+@Config(qualifiers = PHONE)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class AttachSheetLayoutTest {
+    @get:Rule val rule = createComposeRule()
+    private val dir = System.getenv("HAPPY_SHOTS_DIR")?.let(::File)
+
+    private fun shot(name: String, dark: Boolean) {
+        val dir = dir ?: return
+        dir.mkdirs()
+        rule.mainClock.advanceTimeBy(1_000)
+        val bitmap = rule.onRoot().captureToImage().asAndroidBitmap()
+        File(dir, "attach-$name-${if (dark) "dark" else "light"}.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
+    private fun cells() = rule.onAllNodesWithTag(AttachTags.CELL, useUnmergedTree = true)
+    private fun checks() = rule.onAllNodesWithTag(AttachTags.CHECK, useUnmergedTree = true)
+
+    @Test fun `camera spans two cells beside the first four photos and opens without selecting`() {
+        val camera = AttachCameraState()
+        var opened = 0
+        camera.open = { opened++ }
+        val selection = AttachSelection(20)
+        rule.setHappyContent { SheetUnderTest(camera = camera, selection = selection) }
+        val tile = rule.node(com.slopus.happy.ui.camera.PhotoTags.TILE).bounds
+        val first = cells()[0].bounds
+        val second = cells()[1].bounds
+        val third = cells()[2].bounds
+        assertDp("camera width", first.width, tile.width)
+        assertDp("two rows", first.height * 2 + 2.dp, tile.height)
+        assertDp("top", first.top, tile.top)
+        assertDp("first column", 2, tile.left)
+        assertDp("photos beside camera", 2, first.left - tile.right)
+        assertDp("photo gap", 2, second.left - first.right)
+        assertDp("second row", 2, third.top - first.bottom)
+        rule.node(com.slopus.happy.ui.camera.PhotoTags.TILE).performClick()
+        assertEquals(1, opened)
+        assertEquals(0, selection.count)
+        checks()[0].performClick()
+        assertEquals(1, selection.number(fakeGallery()[0].uri))
+    }
+
+    @Test fun `denied library access can still open the camera without a tile`() {
+        val camera = AttachCameraState()
+        var opened = 0
+        camera.open = { opened++ }
+        rule.setHappyContent { SheetUnderTest(content = GalleryContent(GalleryAccess.None), camera = camera) }
+        rule.node(com.slopus.happy.ui.camera.PhotoTags.TILE).assertDoesNotExist()
+        rule.onNodeWithText("Open Camera").performClick()
+        assertEquals(1, opened)
+    }
+
+    @Test fun `the grid rests at two fifths, three columns 2 apart`() {
+        rule.setHappyContent { SheetUnderTest() }
+        rule.waitForIdle()
+        assertDp("sheet", 411, rule.node(AttachTags.SHEET).bounds.width)
+        val first = cells()[0].bounds
+        val second = cells()[1].bounds
+        val fourth = cells()[3].bounds
+        val side = (411f - 2 * 2 - 2 * 2) / 3
+        assertDp("first row at 2/5 + 4", 891 * 0.4f + 4, first.top)
+        assertDp("padding", 2, first.left)
+        assertDp("cell", side.dp, first.width)
+        assertDp("square", side.dp, first.height)
+        assertDp("gap", 2, second.left - first.right)
+        assertDp("row gap", 2, fourth.top - first.bottom)
+        // The check's 48 corner (Telegram's 42, grown to Android's target), top right of its cell.
+        val check = checks()[0].bounds
+        assertDp("check touch", 48, check.width)
+        assertDp("check right", first.right, check.right)
+        assertDp("check top", first.top, check.top)
+        // The grabber 10 under the sheet's top, 24 over the first row.
+        val grabber = rule.node(AttachTags.GRABBER).bounds
+        assertDp("grabber", first.top - 24.dp + 10.dp, grabber.top)
+        assertDp("grabber", 36, grabber.width)
+        // The tab bar's 70 at the foot, its glass narrowed to two tabs.
+        val bar = rule.node(AttachTags.TAB_BAR).bounds
+        assertDp("tab bar", 70, bar.height)
+        assertDp("tab bar foot", 891, bar.bottom)
+        val gallery = rule.node(AttachTags.tab(AttachTabKind.Gallery)).bounds
+        assertDp("tab", 48, gallery.height)
+        assertDp("tab", (196f - 22) / 2, gallery.width)
+        assertTrue("videos carry their length", rule.onAllNodesWithTag(AttachTags.VIDEO_BADGE, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty())
+        rule.onNodeWithText("0:08").assertIsDisplayed()
+    }
+
+    @Test fun `picking numbers the checks and brings in the caption bar`() {
+        lateinit var selection: AttachSelection
+        rule.setHappyContent {
+            selection = remember { AttachSelection(20) }
+            SheetUnderTest(selection = selection)
+        }
+        rule.waitForIdle()
+        val restingGrabber = rule.node(AttachTags.GRABBER).bounds.top
+        checks()[2].performClick()
+        checks()[0].performClick()
+        rule.waitForIdle()
+        assertEquals(2, selection.count)
+        assertEquals(1, selection.number(fakeGallery()[2].uri))
+        assertEquals(2, selection.number(fakeGallery()[0].uri))
+        rule.mainClock.advanceTimeBy(1_000)
+        rule.node(AttachTags.CAPTION_BAR).assertIsDisplayed()
+        rule.node(AttachTags.COUNTER).assertIsDisplayed()
+        rule.node(AttachTags.TAB_BAR).assertDoesNotExist()
+        rule.onNodeWithText("2 selected").assertIsDisplayed()
+        // The sheet grew 26 at its top for the header; the grabber went with it.
+        assertDp("header", restingGrabber - 26.dp, rule.node(AttachTags.GRABBER).bounds.top)
+        // The caption bar is the chat composer's pill: 12 in, 48 tall on one line, send's 36 circle 6 from its end.
+        val bar = rule.node(AttachTags.CAPTION_BAR).bounds
+        val send = rule.node(AttachTags.SEND).bounds
+        assertDp("bar in", 12, bar.left)
+        assertDp("bar end", 411 - 12, bar.right)
+        assertDp("one line", 48, bar.height)
+        assertDp("send", 36, send.width)
+        assertDp("send end", bar.right - 6.dp, send.right)
+        assertDp("send foot", bar.bottom - 6.dp, send.bottom)
+        val counter = rule.node(AttachTags.COUNTER).bounds
+        // The confirm pill at the header's far end, its middle on the "N selected" line.
+        val confirm = rule.node(AttachTags.CONFIRM).bounds
+        val header = rule.node(AttachTags.HEADER).bounds
+        assertTrue("at least 52 wide", confirm.width >= 52.dp - 0.5.dp)
+        assertDp("confirm", 38, confirm.height)
+        assertDp("12 from the sheet's end", 411 - 12, confirm.right)
+        assertTrue("on the header's line: $confirm / $header", confirm.top < header.bottom && confirm.bottom > header.top)
+        assertTrue("above the first row", confirm.bottom <= cells()[0].bounds.top)
+        assertTrue("its count inside it", counter.left >= confirm.left && counter.right <= confirm.right)
+        // Unpicking the first renumbers the second.
+        checks()[2].performClick()
+        rule.waitForIdle()
+        assertEquals(1, selection.number(fakeGallery()[0].uri))
+    }
+
+    @Test fun `send keeps the caption's bottom right corner as the words grow, five lines at most`() {
+        lateinit var selection: AttachSelection
+        rule.setHappyContent {
+            selection = remember { AttachSelection(20) }
+            SheetUnderTest(selection = selection)
+        }
+        rule.waitForIdle()
+        checks()[0].performClick()
+        rule.mainClock.advanceTimeBy(1_000)
+        val heights = listOf(1, 3, 5, 12).map { lines ->
+            rule.node(AttachTags.CAPTION).performTextReplacement((1..lines).joinToString("\n") { "Line $it" })
+            rule.mainClock.advanceTimeBy(1_000)
+            val bar = rule.node(AttachTags.CAPTION_BAR).bounds
+            val send = rule.node(AttachTags.SEND).bounds
+            assertDp("send end at $lines lines", bar.right - 6.dp, send.right)
+            assertDp("send foot at $lines lines", bar.bottom - 6.dp, send.bottom)
+            bar.height
+        }
+        assertTrue("it grows to three lines: $heights", heights[1] > heights[0])
+        assertTrue("and five: $heights", heights[2] > heights[1])
+        assertDp("then scrolls", heights[2], heights[3])
+    }
+
+    @Test fun `the check's corner picks, the rest of the picture opens it`() {
+        lateinit var selection: AttachSelection
+        val opened = ArrayList<String>()
+        rule.setHappyContent {
+            selection = remember { AttachSelection(20) }
+            SheetUnderTest(selection = selection, onOpen = { opened += it.uri })
+        }
+        rule.waitForIdle()
+        // 46 in from the corner: past Telegram's 42, inside the 48.
+        cells()[1].performTouchInput { click(Offset(width - 46.dp.toPx(), 46.dp.toPx())) }
+        rule.waitForIdle()
+        assertEquals(1, selection.number(fakeGallery()[1].uri))
+        assertTrue(opened.isEmpty())
+        cells()[1].performTouchInput { click(Offset(width - 52.dp.toPx(), 52.dp.toPx())) }
+        rule.waitForIdle()
+        assertEquals(listOf(fakeGallery()[1].uri), opened)
+        assertEquals(1, selection.count)
+    }
+
+    @Test fun `a pull of eight millimetres at the top closes it, a short one springs back`() {
+        var closed = 0
+        rule.setHappyContent { SheetUnderTest(onClose = { closed++ }) }
+        rule.waitForIdle()
+        rule.node(AttachTags.GALLERY).performTouchInput { swipeDown(startY = centerY, endY = centerY + 40f, durationMillis = 400) }
+        rule.mainClock.advanceTimeBy(1_000)
+        assertEquals(0, closed)
+        rule.node(AttachTags.GALLERY).performTouchInput { swipeDown(startY = centerY - 300f, endY = centerY + 400f, durationMillis = 400) }
+        rule.mainClock.advanceTimeBy(1_000)
+        assertEquals(1, closed)
+    }
+
+    @Test fun `no access asks, partial access offers to choose more`() {
+        var content by mutableStateOf(GalleryContent(GalleryAccess.None))
+        rule.setHappyContent { SheetUnderTest(content = content) }
+        rule.waitForIdle()
+        rule.node(AttachTags.ASK).assertIsDisplayed()
+        rule.node(AttachTags.ALLOW).assertIsDisplayed()
+        content = GalleryContent(GalleryAccess.Partial, fakeGallery(4), loaded = true)
+        rule.waitForIdle()
+        rule.node(AttachTags.MANAGE).assertIsDisplayed()
+        assertEquals(4, cells().fetchSemanticsNodes().size)
+        content = GalleryContent(GalleryAccess.Full, emptyList(), loaded = true)
+        rule.waitForIdle()
+        rule.node(AttachTags.EMPTY).assertIsDisplayed()
+    }
+
+    @Test fun `the File tab lists its sources, then recent files in 64 rows`() {
+        rule.setHappyContent { SheetUnderTest() }
+        rule.waitForIdle()
+        rule.node(AttachTags.tab(AttachTabKind.Files)).performClick()
+        rule.mainClock.advanceTimeBy(1_000)
+        rule.node(AttachTags.GALLERY).assertDoesNotExist()
+        val browse = rule.node(AttachTags.BROWSE).bounds
+        assertDp("row and divider", 65, browse.height)
+        assertDp("rests where the grid did", 891 * 0.4f + 4, browse.top)
+        rule.node(AttachTags.RECENT).assertIsDisplayed()
+        rule.onNodeWithText("Report.pdf").assertIsDisplayed()
+        assertEquals(3, rule.onAllNodesWithTag(AttachTags.FILE_ROW, useUnmergedTree = true).fetchSemanticsNodes().size)
+    }
+
+    private fun assertDp(message: String, expected: Float, actual: androidx.compose.ui.unit.Dp) = assertDp(message, expected.dp, actual)
+
+    @Test fun shots() {
+        if (dir == null) return
+        var dark by mutableStateOf(false)
+        var state by mutableStateOf(0)
+        rule.setContent {
+            com.slopus.happy.ui.theme.HappyTheme(preference = if (dark) com.slopus.happy.ui.theme.ThemePreference.Dark else com.slopus.happy.ui.theme.ThemePreference.Light) {
+                // A fresh sheet for each state.
+                androidx.compose.runtime.key(state, dark) {
+                    when (state) {
+                        0 -> SheetUnderTest()
+                        1 -> {
+                            val selection = remember { AttachSelection(20).apply { listOf(0, 2, 5).forEach { toggle(fakeGallery()[it].picked()) } } }
+                            SheetUnderTest(selection = selection)
+                        }
+                        2 -> SheetUnderTest(startTab = AttachTabKind.Files)
+                        else -> SheetUnderTest(content = GalleryContent(GalleryAccess.None))
+                    }
+                }
+            }
+        }
+        for (theme in listOf(false, true)) {
+            for ((index, name) in listOf("gallery", "picked", "files", "access").withIndex()) {
+                dark = theme
+                state = index
+                rule.waitForIdle()
+                shot(name, theme)
+            }
+        }
+    }
+}
+
+/** The same sheet on a Galaxy Z Fold7's inner screen: 640 wide at most, centred, four columns. */
+@RunWith(AndroidJUnit4::class)
+@Config(qualifiers = "w750dp-h832dp-xxhdpi")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class AttachSheetFoldTest {
+    @get:Rule val rule = createComposeRule()
+
+    @Test fun `the sheet keeps Material's 640 and centres`() {
+        rule.setHappyContent { SheetUnderTest() }
+        rule.waitForIdle()
+        val sheet = rule.node(AttachTags.SHEET).bounds
+        assertDp("sheet", 640, sheet.width)
+        assertDp("centred", 55, sheet.left)
+        val cells = rule.onAllNodesWithTag(AttachTags.CELL, useUnmergedTree = true)
+        val side = AttachSpec.cell(640.dp, 4)
+        assertDp("cell", side, cells[0].bounds.width)
+        assertDp("four across", cells[0].bounds.top, cells[3].bounds.top)
+        assertTrue(cells[4].bounds.top > cells[0].bounds.bottom)
+        assertDp("tab bar foot", 832, rule.node(AttachTags.TAB_BAR).bounds.bottom)
+        System.getenv("HAPPY_SHOTS_DIR")?.let(::File)?.let { dir ->
+            dir.mkdirs()
+            rule.mainClock.advanceTimeBy(1_000)
+            val bitmap = rule.onRoot().captureToImage().asAndroidBitmap()
+            File(dir, "attach-fold-light.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
+    }
+}

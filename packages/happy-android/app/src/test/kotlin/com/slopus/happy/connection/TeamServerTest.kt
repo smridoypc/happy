@@ -1,0 +1,830 @@
+package com.slopus.happy.connection
+
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.slopus.happy.agent.AgentApiException
+import com.slopus.happy.agent.AgentClient
+import com.slopus.happy.agent.AgentSessions
+import com.slopus.happy.analytics.AnalyticsEvent
+import com.slopus.happy.analytics.SignInError
+import com.slopus.happy.analytics.SignInMethod
+import com.slopus.happy.auth.ExpoSecureStore
+import com.slopus.happy.auth.SecureStoreKeys
+import com.slopus.happy.testing.SoftwareKeys
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
+import java.io.File
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.tls.HandshakeCertificates
+import okhttp3.tls.HeldCertificate
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/**
+ * A team server behind an SSO edge, kept as an agent connection: its
+ * refresh token Keystore-encrypted, its access token refreshed before it
+ * expires and after a 401, and the edge's refusals read as "sign in again".
+ */
+@RunWith(AndroidJUnit4::class)
+class TeamServerTest {
+    private val context = ApplicationProvider.getApplicationContext<Context>()
+    private val keys = SoftwareKeys()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val certificate = HeldCertificate.Builder().commonName("localhost").addSubjectAlternativeName("localhost").build()
+    private val sso = MockWebServer().apply {
+        useHttps(HandshakeCertificates.Builder().heldCertificate(certificate).build().sslSocketFactory())
+        protocols = listOf(Protocol.HTTP_1_1)
+        start()
+    }
+    private val roots = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
+    private val http = OkHttpClient.Builder().sslSocketFactory(roots.sslSocketFactory(), roots.trustManager).build()
+    private var now = 1_000_000L
+    private val auth = ServerAuthClient(http, now = { now })
+    private val daemon = Daemon()
+    private val origin = AgentOrigin.parse("https://happy.acme.example")
+    private val secretPrefs get() = context.getSharedPreferences(AgentConnections.SECRETS_PREFS, Context.MODE_PRIVATE)
+    private val registryPrefs get() = context.getSharedPreferences(AgentConnections.REGISTRY_PREFS, Context.MODE_PRIVATE)
+
+    private fun connections(keys: SecureStoreKeys = this.keys) = AgentConnections(
+        secrets = ExpoSecureStore(secretPrefs, keys, keychainService = AgentConnections.KEYCHAIN_SERVICE),
+        registry = registryPrefs,
+        makeTransport = { daemon },
+        now = { now },
+        serverAuth = auth,
+    )
+
+    private val refreshUrl get() = "https://localhost:${sso.port}/oauth/token"
+    private fun json(body: String, code: Int = 200) = MockResponse.Builder().code(code).addHeader("Content-Type", "application/json").body(body).build()
+
+    /** The daemon behind the edge: accepts [valid] tokens; [edge] answers in its place when set. */
+    private class Daemon : Transport {
+        val valid = mutableSetOf<String>()
+        var edge: TransportResponse? = null
+        /** Tokens of a member without a profile: everything but health, profile and discovery is a 401. */
+        val noProfile = mutableSetOf<String>()
+        /** Tokens of a member without a profile on a cluster after 7333447: a 403 `profile_required` instead of the 401. */
+        val noProfile403 = mutableSetOf<String>()
+        val calls = mutableListOf<Pair<String, String>>()
+        /** Set: every request waits on it, after saying so in [held]. */
+        @Volatile var hold: CompletableDeferred<Unit>? = null
+        val held = CompletableDeferred<Unit>()
+
+        override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>, category: RequestCategory): TransportResponse {
+            calls += path to credential
+            hold?.let { gate ->
+                held.complete(Unit)
+                gate.await()
+            }
+            edge?.let { return it }
+            if (path == "/v0/authentication") {
+                val ok = credential in valid
+                val user = if (ok && credential !in noProfile) "\"u1\"" else "null"
+                return TransportResponse(200, mapOf("content-type" to "application/json"), "{\"authenticated\":$ok,\"userId\":$user,\"methods\":[]}".toByteArray())
+            }
+            if (credential !in valid) return happy(401, "unauthorized")
+            if (credential in noProfile && path !in setOf("/v0/health", "/v0/profile")) return happy(401, "unauthorized")
+            if (credential in noProfile403 && path !in setOf("/v0/health", "/v0/profile")) return happy(403, "profile_required")
+            return when (path) {
+                "/v0/health" -> TransportResponse(200, mapOf("content-type" to "application/json"), """{"healthy":true,"ready":true,"version":{"protocol":33,"daemon":"1"},"capabilities":{"webSocketTunnels":true}}""".toByteArray())
+                // A member may not read the node's configuration.
+                "/v0/config" -> happy(403, "forbidden")
+                "/v0/forbidden" -> happy(403, "forbidden")
+                else -> TransportResponse(200, mapOf("content-type" to "application/json"), "{}".toByteArray())
+            }
+        }
+
+        override suspend fun close() {}
+
+        fun happy(status: Int, code: String) = TransportResponse(status, mapOf("content-type" to "application/json"), """{"error":"$code","code":"$code"}""".toByteArray())
+    }
+
+    @Before
+    fun setUp() {
+        secretPrefs.edit().clear().commit()
+        registryPrefs.edit().clear().commit()
+    }
+
+    @After
+    fun tearDown() {
+        scope.cancel()
+        sso.close()
+    }
+
+    private suspend fun signedIn(connections: AgentConnections, expiresIn: Long = 300_000): AgentConnection {
+        daemon.valid += "access-1"
+        val credential = OAuthCredential("jwt", "happy", refreshUrl, "refresh-1", "https://happy.acme.example", userId = "u1")
+        return connections.addServer(origin, credential, AccessToken("access-1", now + expiresIn), fallbackName = "happy.acme.example")
+    }
+
+    /** [id]'s client; with [tellsAccount], its refusals sign the account out as a session's do. */
+    private fun client(connections: AgentConnections, id: String, tellsAccount: Boolean = false) = AgentClient.lazy {
+        val credentials = connections.credentials(id)!!
+        AgentClient.Link(daemon, connections.bearer(id, credentials), renew = { stale -> connections.renew(id, stale) }, signedOut = if (tellsAccount) { profile -> connections.signedOut(id, profile) } else null)
+    }
+
+    @Test
+    fun aServerIsKeptWithItsRefreshTokenEncrypted() = runBlocking {
+        val connections = connections()
+        val account = signedIn(connections)
+        assertEquals("https://happy.acme.example", account.server)
+        assertEquals("happy.acme.example", account.name)
+        val credentials = connections()
+            .credentials(account.id)!!
+        assertEquals("https://happy.acme.example", credentials.publicUrl)
+        assertEquals("", credentials.deviceToken)
+        assertEquals("refresh-1", credentials.oauth?.refreshToken)
+        assertFalse((secretPrefs.all.values + registryPrefs.all.values).joinToString().contains("refresh-1"))
+        // The access token is in memory only.
+        assertFalse((secretPrefs.all.values + registryPrefs.all.values).joinToString().contains("access-1"))
+        assertEquals("access-1", connections.bearer(account.id, credentials))
+        // The same member signing in again renews the same connection.
+        assertEquals(account.id, signedIn(connections).id)
+        assertEquals(1, connections.accounts.value.size)
+    }
+
+    @Test
+    fun anExpiringTokenIsRefreshedAndTheRotationKept() = runBlocking {
+        val connections = connections()
+        val account = signedIn(connections, expiresIn = 30_000)
+        val access2 = jwt("https://happy.acme.example", tag = "access-2")
+        sso.enqueue(json("""{"access_token":"$access2","token_type":"Bearer","expires_in":600,"refresh_token":"refresh-2"}"""))
+        daemon.valid += access2
+        // Within a minute of expiry: refreshed before it is sent.
+        assertEquals(access2, connections.bearer(account.id, connections.credentials(account.id)!!))
+        assertEquals("refresh-2", connections().credentials(account.id)?.oauth?.refreshToken)
+        assertEquals("/oauth/token", sso.takeRequest().target)
+        // Fresh now: no second refresh.
+        assertEquals(access2, connections.bearer(account.id, connections.credentials(account.id)!!))
+        assertEquals(1, sso.requestCount)
+    }
+
+    @Test
+    fun a401IsRetriedOnceWithARenewedToken() = runBlocking {
+        val connections = connections()
+        val account = signedIn(connections)
+        // The IdP revoked access-1 early: the daemon refuses it.
+        daemon.valid.clear()
+        val access2 = jwt("https://happy.acme.example", tag = "access-2")
+        daemon.valid += access2
+        sso.enqueue(json("""{"access_token":"$access2","token_type":"Bearer","expires_in":600}"""))
+        val client = client(connections, account.id)
+        assertEquals(200, client.send("GET", "/v0/projects").status)
+        assertEquals(listOf("/v0/projects" to "access-1", "/v0/authentication" to "access-1", "/v0/projects" to access2), daemon.calls.filter { it.first == "/v0/projects" || it.first == "/v0/authentication" })
+        // A refusal from the daemon itself is an ordinary error, not a sign-in.
+        try { client.send("GET", "/v0/forbidden"); fail() } catch (e: AgentApiException) { assertEquals("forbidden", e.code) }
+    }
+
+    @Test
+    fun aDaemon401WithAValidTokenIsTheProfileGate() = runBlocking {
+        val connections = connections()
+        val account = signedIn(connections)
+        daemon.noProfile += "access-1"
+        val client = client(connections, account.id)
+        try { client.send("GET", "/v0/projects"); fail() } catch (e: AgentConnectionException) { assertEquals(AgentConnectionException.Reason.ProfileRequired, e.reason) }
+        // Asked, not refreshed.
+        assertEquals(0, sso.requestCount)
+        assertEquals("access-1", daemon.calls.last { it.first == "/v0/authentication" }.second)
+    }
+
+    @Test
+    fun theDaemons403ProfileRequiredIsTheProfileGate() = runBlocking {
+        val connections = connections()
+        val account = signedIn(connections)
+        daemon.noProfile403 += "access-1"
+        val client = client(connections, account.id, tellsAccount = true)
+        try { client.send("GET", "/v0/projects"); fail() } catch (e: AgentConnectionException) { assertEquals(AgentConnectionException.Reason.ProfileRequired, e.reason) }
+        // No refresh and no sign-in: a name is owed, and the credentials stay.
+        assertEquals(0, sso.requestCount)
+        val owed = connections.accounts.value.single()
+        assertTrue(owed.signInRequired && owed.profileRequired)
+        assertFalse(owed.sessionEnded)
+        assertTrue(connections.credentials(account.id) != null)
+        // The node's name and picture, read the same way, say so too.
+        try { AgentIdentity.refresh(client.requester, "x", oauth = true); fail() } catch (e: AgentConnectionException) { assertEquals(AgentConnectionException.Reason.ProfileRequired, e.reason) }
+        // Any other 403 of the daemon's stays an ordinary refusal.
+        daemon.noProfile403.clear()
+        try { client.send("GET", "/v0/forbidden"); fail() } catch (e: AgentApiException) { assertEquals("forbidden", e.code) }
+    }
+
+    @Test
+    fun theEdgeAndAFailedRefreshMeanSignInAgain() = runBlocking {
+        val connections = connections()
+        val account = signedIn(connections)
+        val client = client(connections, account.id)
+        for (edge in listOf(
+            TransportResponse(302, mapOf("location" to "https://idp.example/login")),
+            // The edge's own 401: no refresh, no discovery check.
+            TransportResponse(401, mapOf("content-type" to "text/html"), "<html>login</html>".toByteArray()),
+            TransportResponse(403, mapOf("content-type" to "text/html"), "<html>denied</html>".toByteArray()),
+        )) {
+            daemon.edge = edge
+            try { client.send("GET", "/v0/projects"); fail() } catch (e: AgentConnectionException) { assertEquals(AgentConnectionException.Reason.SignInRequired, e.reason) }
+        }
+        assertEquals(0, sso.requestCount)
+        assertTrue(daemon.calls.none { it.first == "/v0/authentication" })
+        // A 401 the refresh can't fix: the connection is flagged for the person.
+        daemon.edge = null
+        daemon.valid.clear()
+        sso.enqueue(json("""{"error":"invalid_grant"}""", 400))
+        try { client.send("GET", "/v0/projects"); fail() } catch (e: AgentConnectionException) { assertEquals(AgentConnectionException.Reason.SignInRequired, e.reason) }
+        assertTrue(withTimeout(5_000) { connections.accounts.first { list -> list.any { it.signInRequired } } }.isNotEmpty())
+    }
+
+    private fun member(user: String, refresh: String) = OAuthCredential("jwt", "happy", refreshUrl, refresh, "https://happy.acme.example", userId = user)
+
+    @Test
+    fun anotherMemberSigningInGetsAConnectionOfTheirOwn(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a", "access-a2", "access-b")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        assertEquals("u-a", a.userId)
+        // The same member again: the same connection, renewed in place.
+        val again = connections.addServer(origin, member("u-a", "refresh-a2"), AccessToken("access-a2", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id)
+        assertEquals(a.id, again.id)
+        connections.signedOut(a.id)
+        // Someone else signs in again on it: a new connection, and the first one is wiped.
+        val b = connections.addServer(origin, member("u-b", "refresh-b"), AccessToken("access-b", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id)
+        assertTrue(b.id != a.id)
+        assertEquals(listOf(b.id), connections.accounts.value.map { it.id })
+        assertEquals(null, connections.credentials(a.id))
+        assertEquals("refresh-b", connections.credentials(b.id)?.oauth?.refreshToken)
+        assertFalse(connections.accounts.value.single().signInRequired)
+        // Not replacing, by origin alone: still only the same member's.
+        val c = connections.addServer(origin, member("u-c", "refresh-c"), AccessToken("access-b", now + 300_000), fallbackName = "happy.acme.example")
+        assertTrue(c.id != b.id)
+        assertEquals(setOf(b.id, c.id), connections.accounts.value.map { it.id }.toSet())
+    }
+
+    @Test
+    fun theReplacedMembersCachesAreWipedEvenWhenItWasntOpen(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a", "access-b")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        val dir = kotlin.io.path.createTempDirectory("agent-connections").toFile()
+        val catalog = File(dir, "${a.id}.json").apply { writeText("{}") }
+        val chat = File(dir, "${a.id}.chats.json").apply { writeText("{}") }
+        // Left by a connection forgotten while the app wasn't running.
+        val orphan = File(dir, "agent-connection-gone.json").apply { writeText("{}") }
+        AgentSessions(connections, scope, dir, openId = MutableStateFlow(null), foreground = MutableStateFlow(false), makeTransport = { daemon })
+        withTimeout(5_000) { while (orphan.exists()) delay(10) }
+        assertTrue(catalog.exists() && chat.exists())
+        connections.addServer(origin, member("u-b", "refresh-b"), AccessToken("access-b", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id)
+        withTimeout(5_000) { while (catalog.exists() || chat.exists()) delay(10) }
+        dir.deleteRecursively()
+    }
+
+    /** At launch, the sessions picked (Happy Cloud's from an earlier build, C9) end as a refused refresh's would; the rest stand. */
+    @Test
+    fun theSessionsALaunchPicksEndAndNoOthers(): Unit = runBlocking {
+        val connections = connections()
+        val beta = AgentOrigin.parse("https://beta.acme.example")
+        val old = connections.addServer(origin, member("u-a", "refresh-old"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        val kept = connections.addServer(beta, OAuthCredential("jwt", "happy", "https://api.acme.example/token", "refresh-new", "https://beta.acme.example/", userId = "u-b"), AccessToken("access-b", now + 300_000), fallbackName = "beta.acme.example")
+        connections.endSessions { connection, credential -> connection.server == origin.value && credential.refreshUrl != "https://api.acme.example/token" }
+        assertTrue(connections.accounts.value.single { it.id == old.id }.sessionEnded)
+        assertEquals(null, connections.credentials(old.id))
+        assertFalse(connections.accounts.value.single { it.id == kept.id }.signInRequired)
+        assertEquals("refresh-new", connections.credentials(kept.id)?.oauth?.refreshToken)
+        // Nothing was asked of any token endpoint.
+        assertEquals(0, sso.requestCount)
+    }
+
+    @Test
+    fun aSessionEndingLeavesOnlyItsSignInAndNothingOfItsServer(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a", "access-b")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        val other = AgentOrigin.parse("https://happy.other.example")
+        val b = connections.addServer(other, member("u-b", "refresh-b"), AccessToken("access-b", now + 300_000), fallbackName = "happy.other.example")
+        val dir = kotlin.io.path.createTempDirectory("agent-connections").toFile()
+        val staged = kotlin.io.path.createTempDirectory("conversation-media").toFile()
+        // A's catalog, a kept conversation, its outbox and its downloaded files; B's catalog and outbox.
+        val aFiles = listOf("${a.id}.json", "${a.id}.chats.json", "${a.id}.intents.json").map { File(dir, it).apply { writeText("{}") } } +
+            File(dir, "${a.id}.media").apply { mkdirs(); File(this, "photo.jpg").writeText("x") }
+        val bFiles = listOf("${b.id}.json", "${b.id}.intents.json").map { File(dir, it).apply { writeText("{}") } }
+        val opened = File(staged, "vault-1-1").apply { mkdirs(); File(this, "report.pdf").writeText("x") }
+        val sessions = AgentSessions(connections, scope, dir, stagedFiles = staged, openId = MutableStateFlow(a.id), foreground = MutableStateFlow(false), makeTransport = { daemon })
+        val session = sessions.session(a.id)!!
+        delay(200)
+        assertTrue(aFiles.all { it.exists() })
+
+        connections.signedOut(a.id)
+        withTimeout(5_000) { while (aFiles.any { it.exists() } || opened.exists()) delay(10) }
+        // A keeps its entry, for its Sign in, and nothing else: no credentials, no token, no session.
+        val ended = connections.accounts.value.single { it.id == a.id }
+        assertTrue(ended.sessionEnded)
+        assertEquals(null, connections.credentials(a.id))
+        assertEquals(null, sessions.session(a.id))
+        // B, another server, is untouched.
+        assertTrue(bFiles.all { it.exists() })
+        assertEquals("refresh-b", connections.credentials(b.id)?.oauth?.refreshToken)
+        assertFalse(connections.accounts.value.single { it.id == b.id }.signInRequired)
+        assertEquals("access-b", connections.bearer(b.id, connections.credentials(b.id)!!))
+
+        // Signed in again: a new session, from nothing.
+        connections.addServer(origin, member("u-a", "refresh-a2"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id)
+        assertFalse(connections.accounts.value.single { it.id == a.id }.sessionEnded)
+        assertTrue(sessions.session(a.id) !== session)
+        dir.deleteRecursively()
+        staged.deleteRecursively()
+    }
+
+    @Test
+    fun aNameOwedIsNotAnEndedSession(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        connections.signedOut(a.id, profileRequired = true)
+        val owed = connections.accounts.value.single()
+        assertTrue(owed.signInRequired && owed.profileRequired)
+        assertFalse(owed.sessionEnded)
+        assertEquals("refresh-a", connections.credentials(a.id)?.oauth?.refreshToken)
+        assertEquals("refresh-a", connections().credentials(a.id)?.oauth?.refreshToken)
+    }
+
+    @Test
+    fun aSessionEndedUnderAnOlderBuildHasItsCredentialsForgottenOnStart(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        // Signed out as builds before did: flagged, the credentials kept.
+        connections.update(a.id) { it.copy(signInRequired = true) }
+        assertEquals("refresh-a", connections.credentials(a.id)?.oauth?.refreshToken)
+        val started = connections()
+        assertTrue(started.accounts.value.single().sessionEnded)
+        assertEquals(null, started.credentials(a.id))
+    }
+
+    @Test
+    fun aRefreshOfAnOlderGrantIsDroppedWhenASignInLandsFirst(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a", "access-b")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now), fallbackName = "happy.acme.example")
+        // A's refresh is slow; the person signs in again (as B) before it answers.
+        sso.enqueue(json("""{"access_token":"${jwt("https://happy.acme.example", tag = "late")}","token_type":"Bearer","expires_in":600,"refresh_token":"refresh-late"}""").newBuilder().headersDelay(1, java.util.concurrent.TimeUnit.SECONDS).build())
+        val late = scope.async { connections.bearer(a.id, connections.credentials(a.id)!!) }
+        withTimeout(5_000) { while (sso.requestCount == 0) delay(10) }
+        val b = connections.addServer(origin, member("u-a", "refresh-b"), AccessToken("access-b", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id)
+        assertEquals(a.id, b.id)
+        // The late answer is dropped: B's grant stands, kept and in use.
+        assertEquals("access-b", late.await())
+        assertEquals("refresh-b", connections.credentials(b.id)?.oauth?.refreshToken)
+        assertEquals("access-b", connections.bearer(b.id, connections.credentials(b.id)!!))
+    }
+
+    @Test
+    fun anOlderGrantsRefusedRefreshDoesntSignOutTheNewOne(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a", "access-b")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now), fallbackName = "happy.acme.example")
+        sso.enqueue(json("""{"error":"invalid_grant"}""", 400).newBuilder().headersDelay(1, java.util.concurrent.TimeUnit.SECONDS).build())
+        val late = scope.async { connections.bearer(a.id, connections.credentials(a.id)!!) }
+        withTimeout(5_000) { while (sso.requestCount == 0) delay(10) }
+        connections.addServer(origin, member("u-a", "refresh-b"), AccessToken("access-b", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id)
+        // Not an auth failure: the request goes on with the new sign-in's token.
+        assertEquals("access-b", late.await())
+        assertFalse(connections.accounts.value.single().signInRequired)
+        assertEquals("refresh-b", connections.credentials(a.id)?.oauth?.refreshToken)
+    }
+
+    /** [keys] whose Keystore refuses while [failing]: a save that can't be made. */
+    private class FlakyKeys(private val inner: SoftwareKeys) : SecureStoreKeys by inner {
+        @Volatile var failing = false
+        override fun secretKey(alias: String): javax.crypto.SecretKey? = if (failing) throw java.security.GeneralSecurityException("Keystore unavailable") else inner.secretKey(alias)
+    }
+
+    /** A's connection, whole: its entry, its credential and its cache. */
+    private suspend fun assertIntact(connections: AgentConnections, a: AgentConnection, cache: File) {
+        assertEquals(listOf(a.id), connections.accounts.value.map { it.id })
+        assertEquals("u-a", connections.accounts.value.single().userId)
+        assertEquals("refresh-a", connections.credentials(a.id)?.oauth?.refreshToken)
+        assertTrue(cache.exists())
+    }
+
+    @Test
+    fun anotherMemberCancelledWhileTheServerIsAskedLeavesTheFirstWhole(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a", "access-b")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        val dir = kotlin.io.path.createTempDirectory("agent-connections").toFile()
+        val cache = File(dir, "${a.id}.json").apply { writeText("{}") }
+        AgentSessions(connections, scope, dir, openId = MutableStateFlow(null), foreground = MutableStateFlow(false), makeTransport = { daemon })
+        daemon.hold = CompletableDeferred()
+        val b = scope.async { connections.addServer(origin, member("u-b", "refresh-b"), AccessToken("access-b", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id) }
+        withTimeout(5_000) { daemon.held.await() }
+        // The person backs out of the sign-in while the server is asked who it is.
+        b.cancel()
+        daemon.hold = null
+        delay(200)
+        assertTrue(b.isCancelled)
+        assertIntact(connections, a, cache)
+        assertIntact(connections(), a, cache)
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun anotherMembersCredentialThatCantBeSavedLeavesTheFirstWhole(): Unit = runBlocking {
+        val flaky = FlakyKeys(keys)
+        val connections = connections(flaky)
+        daemon.valid += setOf("access-a", "access-b")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        val dir = kotlin.io.path.createTempDirectory("agent-connections").toFile()
+        val cache = File(dir, "${a.id}.json").apply { writeText("{}") }
+        AgentSessions(connections, scope, dir, openId = MutableStateFlow(null), foreground = MutableStateFlow(false), makeTransport = { daemon })
+        flaky.failing = true
+        try {
+            connections.addServer(origin, member("u-b", "refresh-b"), AccessToken("access-b", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id)
+            fail()
+        } catch (_: java.security.GeneralSecurityException) {
+        }
+        flaky.failing = false
+        delay(200)
+        assertIntact(connections, a, cache)
+        assertIntact(connections(flaky), a, cache)
+        // And the access token in use is still A's.
+        assertEquals("access-a", connections.bearer(a.id, connections.credentials(a.id)!!))
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun anOlderGrantsRefusedRefreshDoesntSignOutALiveSession(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a", "access-b")
+        // Signed in, its access token expired: the session's first request refreshes it, slowly.
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now), fallbackName = "happy.acme.example")
+        sso.enqueue(json("""{"error":"invalid_grant"}""", 400).newBuilder().headersDelay(1, java.util.concurrent.TimeUnit.SECONDS).build())
+        val sessions = AgentSessions(connections, scope, null, openId = MutableStateFlow(a.id), foreground = MutableStateFlow(true), identityRefreshMillis = 60_000, makeTransport = { daemon })
+        val session = sessions.session(a.id)!!
+        withTimeout(5_000) { while (sso.requestCount == 0) delay(10) }
+        // The same member signs in again before the refusal comes back.
+        connections.addServer(origin, member("u-a", "refresh-b"), AccessToken("access-b", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id)
+        // The session and identity refresh go on with the new token; nothing signs the new sign-in out.
+        withTimeout(10_000) { while (daemon.calls.none { it.second == "access-b" && it.first != "/v0/authentication" }) delay(20) }
+        delay(1_500)
+        assertFalse(connections.accounts.value.single().signInRequired)
+        assertEquals(1, sso.requestCount)
+        assertEquals("refresh-b", connections.credentials(a.id)?.oauth?.refreshToken)
+        assertTrue(session.status.value != com.slopus.happy.agent.AgentLinkStatus.Revoked)
+    }
+
+    @Test
+    fun aRefusalUnderAnOlderSignInDoesntSignOutTheNewOne(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a", "access-b")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        val before = connections.grant(a.id)
+        connections.addServer(origin, member("u-a", "refresh-b"), AccessToken("access-b", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id)
+        // A request made under the first sign-in met the edge's 302 after the second landed.
+        connections.signedOut(a.id, grant = before)
+        assertFalse(connections.accounts.value.single().signInRequired)
+        connections.signedOut(a.id, grant = connections.grant(a.id))
+        assertTrue(connections.accounts.value.single().signInRequired)
+    }
+
+    @Test
+    fun aSignInLandingWhileMissingCredentialsAreCheckedStands(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a", "access-b")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        keys.delete(ExpoSecureStore(secretPrefs, keys, keychainService = AgentConnections.KEYCHAIN_SERVICE).aesAlias(usesKeystoreSuffix = true))
+        // The key is gone when the link reads; the person signs in again before it acts on that.
+        val credentials = connections.linkCredentials(a.id, afterRead = {
+            connections.addServer(origin, member("u-a", "refresh-b"), AccessToken("access-b", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id)
+        })
+        assertEquals("refresh-b", credentials?.oauth?.refreshToken)
+        assertFalse(connections.accounts.value.single().signInRequired)
+    }
+
+    @Test
+    fun aServerWhoseKeystoreKeyIsGoneIsSignedOut(): Unit = runBlocking {
+        val connections = connections()
+        val account = signedIn(connections)
+        // Restored or moved to another phone: the preferences came, the Keystore key didn't.
+        keys.delete(ExpoSecureStore(secretPrefs, keys, keychainService = AgentConnections.KEYCHAIN_SERVICE).aesAlias(usesKeystoreSuffix = true))
+        val again = connections()
+        try { again.linkCredentials(account.id); fail() } catch (e: AgentConnectionException) { assertEquals(AgentConnectionException.Reason.SignInRequired, e.reason) }
+        val listed = again.accounts.value.single()
+        assertTrue(listed.signInRequired)
+        assertFalse(listed.revoked)
+        assertEquals(null, again.credentials(account.id))
+    }
+
+    @Test
+    fun identityReadsHealthsTunnelCapabilityWithoutTheConfig() = runBlocking {
+        val connections = connections()
+        val account = signedIn(connections)
+        val info = AgentIdentity.refresh(client(connections, account.id).requester, "fallback", oauth = true)
+        assertEquals("fallback", info.name)
+        assertTrue(info.webSocketTunnels)
+    }
+
+    @Test
+    fun aSignInRunsDiscoveryBrowserCallbackAndProfile() = runBlocking {
+        val connections = connections()
+        // The daemon's origin is this mock (discovery and profile), and so is the SSO.
+        val server = "https://localhost:${sso.port}"
+        val flow = ServerSignInFlow(scope, connections, auth, expectedInstance = INSTANCE)
+        sso.enqueue(discovery(server))
+        flow.start(server)
+        val ready = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Ready } } as ServerSignInState.Ready
+        assertEquals("Acme SSO", ready.method.name)
+        val url = flow.browserUrl()!!.toHttpUrl()
+        val state = url.queryParameter("state")!!
+        // A stale page's callback is ignored, and so is a malformed one any app could send; this one's is taken.
+        flow.callback("happy://oauth/callback?code=old&state=stale")
+        assertTrue(flow.state.value is ServerSignInState.InBrowser)
+        listOf("happy://oauth/callback?state=%", "happy://oauth/callback?state=%zz&code=x", "happy://oauth/callback?%E0%A4%A=1&state=$state").forEach {
+            flow.callback(it)
+            assertTrue(it, flow.state.value is ServerSignInState.InBrowser)
+        }
+        assertEquals(null, ServerAuthClient.query("happy://oauth/callback?state=%"))
+        val access1 = jwt(server, tag = "access-1")
+        val access2 = jwt(server, tag = "access-2")
+        sso.enqueue(json("""{"access_token":"$access1","token_type":"Bearer","expires_in":600,"refresh_token":"refresh-1"}"""))
+        sso.enqueue(json("""{"authenticated":true,"userId":null,"methods":[]}"""))
+        // The code's installation, checked before the name.
+        sso.enqueue(health(INSTANCE))
+        // What the server suggests: the name to start from, and the email saved with it.
+        sso.enqueue(json("""{"profile":{"userId":null,"name":" Steve K ","email":"steve@acme.example"}}"""))
+        daemon.valid += access1
+        flow.callback("happy://oauth/callback?code=c1&state=$state")
+        val asking = withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName } } as ServerSignInState.NeedsName
+        assertEquals("Steve K", asking.suggested)
+        // The access token expired while the name was typed: refreshed (rotating) once, and saved.
+        sso.enqueue(json("""{"error":"Unauthorized","code":"unauthorized"}""", 401))
+        sso.enqueue(json("""{"access_token":"$access2","token_type":"Bearer","expires_in":600,"refresh_token":"refresh-2"}"""))
+        sso.enqueue(json("""{"profile":{}}"""))
+        sso.enqueue(json("""{"authenticated":true,"userId":"u1","methods":[]}"""))
+        flow.submitName("Steve")
+        val done = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Done } } as ServerSignInState.Done
+        assertEquals(server, done.account.server)
+        assertEquals("refresh-2", connections.credentials(done.account.id)?.oauth?.refreshToken)
+        // A new member: who they are is asked once the name is saved, and kept with the credential.
+        assertEquals("u1", done.account.userId)
+        assertEquals("u1", connections.credentials(done.account.id)?.oauth?.userId)
+        val requests = (0 until sso.requestCount).map { sso.takeRequest() }
+        val patches = requests.filter { it.method == "PATCH" }
+        assertEquals(listOf("Bearer $access1", "Bearer $access2"), patches.map { it.headers["Authorization"] })
+        assertEquals("""{"name":"Steve","email":"steve@acme.example"}""", patches.last().body?.utf8())
+        assertEquals(listOf("Bearer $access1"), requests.filter { it.target == "/v0/health" }.map { it.headers["Authorization"] })
+    }
+
+    @Test
+    fun aSignInWithATokenFromElsewhereSkipsTheBrowser() = runBlocking {
+        val connections = connections()
+        val server = "https://localhost:${sso.port}"
+        val flow = ServerSignInFlow(scope, connections, auth)
+        val access = jwt(server, tag = "cloud-1")
+        sso.enqueue(json("""{"authenticated":true,"userId":"u-cloud","methods":[]}"""))
+        daemon.valid += access
+        flow.startWith(server) { origin ->
+            assertEquals(server, origin.value)
+            OAuthGrant(AccessToken(access, now + 600_000), "cloud-refresh") to
+                OAuthCredential("happy-accounts", "happy", "https://auth.example/token", "cloud-refresh", "$server/")
+        }
+        val done = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Done || it is ServerSignInState.Failed } }
+        assertTrue(done.toString(), done is ServerSignInState.Done)
+        done as ServerSignInState.Done
+        assertEquals("u-cloud", done.account.userId)
+        val kept = connections.credentials(done.account.id)?.oauth
+        assertEquals("https://auth.example/token", kept?.refreshUrl)
+        assertEquals("cloud-refresh", kept?.refreshToken)
+        // Only the server's check: no discovery, no token endpoint.
+        assertEquals(listOf("GET /v0/authentication"), (0 until sso.requestCount).map { sso.takeRequest().let { r -> "${r.method} ${r.target}" } })
+    }
+
+    @Test
+    fun aTokenThatCannotBeHadFailsAndRetriesTheSameWay() = runBlocking {
+        val connections = connections()
+        val server = "https://localhost:${sso.port}"
+        val flow = ServerSignInFlow(scope, connections, auth)
+        var asked = 0
+        flow.startWith(server) {
+            asked++
+            throw ServerAuthException(ServerAuthException.Reason.Denied)
+        }
+        val failed = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Failed } } as ServerSignInState.Failed
+        assertEquals(ServerAuthException.Reason.Denied, failed.reason)
+        flow.retry()
+        withTimeout(5_000) { while (asked < 2) delay(10) }
+        assertEquals(0, sso.requestCount)
+    }
+
+    private fun discovery(server: String) =
+        json("""{"authenticated":false,"userId":null,"methods":[{"type":"oauth","id":"jwt","name":"Acme SSO","authorizationUrl":"$server/authorize","tokenUrl":"$server/token","refreshUrl":"$server/token","clientId":"happy","resource":"https://happy.acme.example"}]}""")
+
+    private fun health(instanceId: String?) =
+        json("""{"healthy":true,"ready":true,"version":{"protocol":33,"daemon":"1"}${instanceId?.let { ",\"instanceId\":\"$it\"" }.orEmpty()}}""")
+
+    /** A sign-in to this mock for [INSTANCE], through discovery and the browser, the code exchanged and checked as [userId]'s. */
+    private suspend fun throughBrowser(flow: ServerSignInFlow, userId: String?, vararg then: MockResponse) {
+        val server = "https://localhost:${sso.port}"
+        sso.enqueue(discovery(server))
+        flow.start(server)
+        withTimeout(5_000) { flow.state.first { it is ServerSignInState.Ready } }
+        val state = flow.browserUrl()!!.toHttpUrl().queryParameter("state")!!
+        val access1 = jwt(server, tag = "access-1")
+        sso.enqueue(json("""{"access_token":"$access1","token_type":"Bearer","expires_in":600,"refresh_token":"refresh-1"}"""))
+        sso.enqueue(json("""{"authenticated":true,"userId":${userId?.let { "\"$it\"" } ?: "null"},"methods":[]}"""))
+        then.forEach(sso::enqueue)
+        daemon.valid += access1
+        flow.callback("happy://oauth/callback?code=c1&state=$state")
+    }
+
+    @Test
+    fun anotherInstallationAtTheCodesAddressIsNotKept() = runBlocking {
+        val connections = connections()
+        val flow = ServerSignInFlow(scope, connections, auth, expectedInstance = INSTANCE)
+        throughBrowser(flow, "u1", health("z9y8x7w6v5u4t3s2r1q0p9o8"))
+        val failed = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Failed } } as ServerSignInState.Failed
+        assertEquals(ServerAuthException.Reason.WrongServer, failed.reason)
+        assertEquals(emptyList<AgentConnection>(), connections.accounts.value)
+    }
+
+    @Test
+    fun aHealthWithoutAnInstanceCantBeVerified() = runBlocking {
+        val connections = connections()
+        val flow = ServerSignInFlow(scope, connections, auth, expectedInstance = INSTANCE)
+        throughBrowser(flow, "u1", health(null))
+        val failed = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Failed } } as ServerSignInState.Failed
+        assertEquals(ServerAuthException.Reason.WrongServer, failed.reason)
+        assertEquals(emptyList<AgentConnection>(), connections.accounts.value)
+    }
+
+    @Test
+    fun aMembersServerIsKeptWhenItIsTheCodesInstallation() = runBlocking {
+        val connections = connections()
+        val flow = ServerSignInFlow(scope, connections, auth, expectedInstance = INSTANCE)
+        throughBrowser(flow, "u1", health(INSTANCE))
+        val done = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Done } } as ServerSignInState.Done
+        assertEquals("https://localhost:${sso.port}", done.account.server)
+    }
+
+    @Test
+    fun closingASignInRecordsHowItEndedOnce() = runBlocking {
+        val recorded = mutableListOf<AnalyticsEvent>()
+        val done = ServerSignInFlow(scope, connections(), auth, expectedInstance = INSTANCE, record = { recorded += it })
+        throughBrowser(done, "u1", health(INSTANCE))
+        withTimeout(5_000) { done.state.first { it is ServerSignInState.Done } }
+        done.close()
+        done.close()
+        val wrong = ServerSignInFlow(scope, connections(), auth, expectedInstance = INSTANCE, record = { recorded += it })
+        throughBrowser(wrong, "u1", health("z9y8x7w6v5u4t3s2r1q0p9o8"))
+        withTimeout(5_000) { wrong.state.first { it is ServerSignInState.Failed } }
+        wrong.close()
+        val left = ServerSignInFlow(scope, connections(), auth, record = { recorded += it })
+        left.close()
+        assertEquals(
+            listOf(
+                AnalyticsEvent.TeamServerSignedIn,
+                AnalyticsEvent.SignInFailed(SignInMethod.TeamServer, SignInError.WrongServer),
+                // Left: nothing.
+            ),
+            recorded,
+        )
+    }
+
+    @Test
+    fun aNewMembersHealthBehindTheProfileGateIsCheckedAfterTheName() = runBlocking {
+        val connections = connections()
+        val flow = ServerSignInFlow(scope, connections, auth, expectedInstance = INSTANCE)
+        throughBrowser(flow, null, json("""{"error":"Unauthorized","code":"unauthorized"}""", 401), json("""{"profile":{}}"""))
+        withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName } }
+        sso.enqueue(json("""{"profile":{}}"""))
+        sso.enqueue(health("z9y8x7w6v5u4t3s2r1q0p9o8"))
+        flow.submitName("Steve")
+        val failed = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Failed } } as ServerSignInState.Failed
+        assertEquals(ServerAuthException.Reason.WrongServer, failed.reason)
+        assertEquals(emptyList<AgentConnection>(), connections.accounts.value)
+    }
+
+    @Test
+    fun aNewMembersPhotoGoesUpAfterTheirNameRefreshedOnce() = runBlocking {
+        val connections = connections()
+        val server = "https://localhost:${sso.port}"
+        val flow = ServerSignInFlow(scope, connections, auth)
+        // No name to suggest: the field starts empty, and no email is sent.
+        throughBrowser(flow, null, json("""{"profile":{"userId":null,"name":null,"email":null}}"""))
+        val asking = withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName } } as ServerSignInState.NeedsName
+        assertEquals(null, asking.suggested)
+        val jpeg = byteArrayOf(-1, -40, -1, 1, 2, 3)
+        flow.choosePhoto(jpeg)
+        assertTrue((flow.state.value as ServerSignInState.NeedsName).photo.contentEquals(jpeg))
+        val access2 = jwt(server, tag = "access-2")
+        sso.enqueue(json("""{"profile":{}}"""))
+        // The photo's token expired: refreshed once, and the photo sent again with the new one.
+        sso.enqueue(json("""{"error":"Unauthorized","code":"unauthorized"}""", 401))
+        sso.enqueue(json("""{"access_token":"$access2","token_type":"Bearer","expires_in":600,"refresh_token":"refresh-2"}"""))
+        sso.enqueue(json("""{"profile":{"photo":{"thumbhash":"abc"}}}"""))
+        sso.enqueue(json("""{"authenticated":true,"userId":"u1","methods":[]}"""))
+        daemon.valid += access2
+        flow.submitName("  Ada  ")
+        assertTrue((flow.state.value as ServerSignInState.NeedsName).saving)
+        val done = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Done || it is ServerSignInState.Failed } }
+        assertTrue(done.toString(), done is ServerSignInState.Done && !done.photoFailed)
+        val requests = (0 until sso.requestCount).map { sso.takeRequest() }
+        val profile = requests.filter { it.target.startsWith("/v0/profile") && it.method != "GET" }
+        assertEquals(listOf("PATCH /v0/profile", "PUT /v0/profile/photo", "PUT /v0/profile/photo"), profile.map { "${it.method} ${it.target}" })
+        assertEquals("""{"name":"Ada"}""", profile[0].body?.utf8())
+        assertEquals("image/jpeg", profile[1].headers["Content-Type"])
+        assertTrue(profile[2].body?.toByteArray()?.contentEquals(jpeg) == true)
+        assertEquals("Bearer $access2", profile[2].headers["Authorization"])
+    }
+
+    @Test
+    fun aPhotoThatWontGoUpStillLands() = runBlocking {
+        val connections = connections()
+        val flow = ServerSignInFlow(scope, connections, auth)
+        throughBrowser(flow, null, json("""{"profile":{"name":"Ada"}}"""))
+        withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName } }
+        flow.choosePhoto(byteArrayOf(1, 2, 3))
+        sso.enqueue(json("""{"profile":{}}"""))
+        sso.enqueue(json("""{"error":"Too large","code":"payload_too_large"}""", 413))
+        sso.enqueue(json("""{"authenticated":true,"userId":"u1","methods":[]}"""))
+        flow.submitName("Ada")
+        val done = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Done || it is ServerSignInState.Failed } }
+        assertTrue(done.toString(), done is ServerSignInState.Done && done.photoFailed)
+        assertEquals(1, connections.accounts.value.size)
+    }
+
+    @Test
+    fun aNameThatWontSaveKeepsThePhotoAndSendsNoPhoto() = runBlocking {
+        val connections = connections()
+        val flow = ServerSignInFlow(scope, connections, auth)
+        throughBrowser(flow, null, json("""{"profile":{"name":"Ada"}}"""))
+        withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName } }
+        val jpeg = byteArrayOf(1, 2, 3)
+        flow.choosePhoto(jpeg)
+        sso.enqueue(json("""{"error":"Bad","code":"invalid_request"}""", 400))
+        flow.submitName("Ada")
+        val failed = withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName && it.failed } } as ServerSignInState.NeedsName
+        assertTrue(failed.photo.contentEquals(jpeg))
+        assertEquals("Ada", failed.suggested)
+        assertFalse(failed.saving)
+        val requests = (0 until sso.requestCount).map { sso.takeRequest() }
+        assertEquals(0, requests.count { it.target == "/v0/profile/photo" })
+        assertEquals(emptyList<AgentConnection>(), connections.accounts.value)
+    }
+
+    @Test
+    fun aMethodWhoseTokenEndpointIsElsewhereIsRefusedBeforeTheBrowser(): Unit = runBlocking {
+        val server = "https://localhost:${sso.port}"
+        val flow = ServerSignInFlow(scope, connections(), auth, expectedInstance = INSTANCE)
+        sso.enqueue(json("""{"authenticated":false,"userId":null,"methods":[{"type":"oauth","id":"jwt","name":"Acme SSO","authorizationUrl":"https://sso.acme.example/authorize","tokenUrl":"$server/token","clientId":"happy"}]}"""))
+        flow.start(server)
+        val failed = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Failed } } as ServerSignInState.Failed
+        assertEquals(ServerAuthException.Reason.CrossOrigin, failed.reason)
+        assertEquals(null, flow.browserUrl())
+    }
+
+    @Test
+    fun aTokenForAnotherServerIsNeitherKeptNorSent(): Unit = runBlocking {
+        val connections = connections()
+        val server = "https://localhost:${sso.port}"
+        val flow = ServerSignInFlow(scope, connections, auth, expectedInstance = INSTANCE)
+        sso.enqueue(discovery(server))
+        flow.start(server)
+        withTimeout(5_000) { flow.state.first { it is ServerSignInState.Ready } }
+        val state = flow.browserUrl()!!.toHttpUrl().queryParameter("state")!!
+        sso.enqueue(json("""{"access_token":"${jwt("https://happy.other.example/", tag = "stolen")}","token_type":"Bearer","expires_in":600,"refresh_token":"refresh-1"}"""))
+        flow.callback("happy://oauth/callback?code=c1&state=$state")
+        val failed = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Failed } } as ServerSignInState.Failed
+        assertEquals(ServerAuthException.Reason.WrongAudience, failed.reason)
+        assertEquals(emptyList<AgentConnection>(), connections.accounts.value)
+        // Only discovery and the exchange: the token went nowhere.
+        assertEquals(2, sso.requestCount)
+    }
+
+    @Test
+    fun aRefreshedTokenForAnotherServerSignsOut(): Unit = runBlocking {
+        val connections = connections()
+        val account = signedIn(connections, expiresIn = 30_000)
+        sso.enqueue(json("""{"access_token":"${jwt("https://happy.acme.example/other/", tag = "x")}","token_type":"Bearer","expires_in":600}"""))
+        try { connections.bearer(account.id, connections.credentials(account.id)!!); fail() } catch (e: AgentConnectionException) { assertEquals(AgentConnectionException.Reason.SignInRequired, e.reason) }
+        assertTrue(connections.accounts.value.single().signInRequired)
+    }
+
+    private companion object {
+        const val INSTANCE = "k3x9q2m7p0a4b8c1d5e6f7g2"
+    }
+}

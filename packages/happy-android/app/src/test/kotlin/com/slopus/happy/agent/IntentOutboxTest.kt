@@ -1,0 +1,299 @@
+package com.slopus.happy.agent
+
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.File
+import java.nio.file.Files
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.CoroutineContext
+
+/** iOS's IntentOutboxTests: kept, one per slot, sent oldest first while up, backed off, refused for good. */
+class IntentOutboxTest {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val clock = AtomicLong(1_000)
+    private val sent = CopyOnWriteArrayList<String>()
+
+    @After
+    fun tearDown() = scope.cancel()
+
+    private fun outbox(storage: IntentStorage = MemoryIntentStorage()) = IntentOutbox(scope, storage, now = clock::get)
+
+    private suspend fun <T> eventually(read: suspend () -> T, check: (T) -> Boolean) {
+        withTimeout(5_000) { while (!check(read())) delay(10) }
+    }
+
+    @Test
+    fun aLaterIntentReplacesOneWaitingInItsSlotAndUnarchiveSharesArchives(): Unit = runBlocking {
+        val box = outbox()
+        val first = box.enqueue(Intent.RENAME, "t1", buildJsonObject { put("title", "One") })
+        box.enqueue(Intent.RENAME, "t2", buildJsonObject { put("title", "Other") })
+        box.enqueue(Intent.RENAME, "t1", buildJsonObject { put("title", "Two") })
+        assertEquals(listOf("t2", "t1"), box.pending.value.map { it.target })
+        assertEquals(mapOf("t1" to "Two", "t2" to "Other"), IntentOverlay.of(box.pending.value).titles)
+        assertEquals("the replaced one is done with", IntentOutbox.Verdict.Taken, box.verdict(first.id))
+        box.enqueue(Intent.ARCHIVE, "t1")
+        box.enqueue(Intent.UNARCHIVE, "t1")
+        assertEquals(listOf(Intent.UNARCHIVE), box.pending.value.filter { it.target == "t1" && it.kind != Intent.RENAME }.map { it.kind })
+    }
+
+    @Test
+    fun nothingGoesWhileOfflineThenAllGoOldestFirst(): Unit = runBlocking {
+        val box = outbox()
+        box.handle(setOf(Intent.READ, Intent.ARCHIVE)) { sent += "${it.kind} ${it.target}" }
+        box.enqueue(Intent.READ, "a")
+        clock.addAndGet(5)
+        box.enqueue(Intent.ARCHIVE, "b")
+        delay(100)
+        assertEquals(emptyList<String>(), sent.toList())
+        box.setOnline(true)
+        eventually({ box.pending.value }) { it.isEmpty() }
+        assertEquals(listOf("read a", "archive b"), sent.toList())
+    }
+
+    @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun goingOfflineStopsAQueuedDrainerBeforeItClaimsAnotherIntent(): Unit = runTest {
+        val box = IntentOutbox(backgroundScope, MemoryIntentStorage(), now = { testScheduler.currentTime })
+        val delivered = mutableListOf<String>()
+        box.setOnline(true)
+        runCurrent()
+
+        // Wake the drainer first, then queue collectLatest's offline cancellation.
+        // setOnline(false) must take effect even when that cancellation runs second.
+        box.handle(setOf(Intent.READ)) { delivered += it.target }
+        box.setOnline(false)
+        box.enqueue(Intent.READ, "waiting")
+        runCurrent()
+        assertEquals(emptyList<String>(), delivered)
+        assertEquals(listOf("waiting"), box.pending.value.map { it.target })
+
+        box.setOnline(true)
+        runCurrent()
+        assertEquals(listOf("waiting"), delivered)
+        assertTrue(box.pending.value.isEmpty())
+    }
+
+    @Test
+    fun aReconnectWakesTheDrainerEvenWhenTheOnlineCollectorMissesTheOfflineState(): Unit = runBlocking {
+        // Run the old drainer before the online observer, exactly as separate
+        // workers may. The observer then sees true→true and conflates the cycle.
+        val dispatcher = object : CoroutineDispatcher() {
+            val queued = ArrayDeque<Runnable>()
+            override fun dispatch(context: CoroutineContext, block: Runnable) { queued.addLast(block) }
+            fun next() { queued.removeFirst().run() }
+            fun drain() { while (queued.isNotEmpty()) next() }
+        }
+        val worker = CoroutineScope(SupervisorJob() + dispatcher)
+        try {
+            val box = IntentOutbox(worker, MemoryIntentStorage())
+            val delivered = mutableListOf<String>()
+            box.setOnline(true)
+            dispatcher.drain()
+            box.handle(setOf(Intent.READ)) { delivered += it.target }
+            box.setOnline(false)
+            box.enqueue(Intent.READ, "waiting")
+            dispatcher.next()
+            assertEquals(emptyList<String>(), delivered)
+
+            box.setOnline(true)
+            dispatcher.drain()
+            assertEquals(listOf("waiting"), delivered)
+            assertTrue(box.pending.value.isEmpty())
+        } finally {
+            worker.cancel()
+            dispatcher.drain()
+        }
+    }
+
+    @Test
+    fun aKindNothingHandlesWaitsForItsDeliverer(): Unit = runBlocking {
+        val box = outbox()
+        box.setOnline(true)
+        box.handle(setOf(Intent.READ)) { sent += it.kind }
+        box.enqueue("todo.text", "todo1", buildJsonObject { put("text", "milk") })
+        box.enqueue(Intent.READ, "a")
+        eventually({ sent.toList() }) { it == listOf(Intent.READ) }
+        assertEquals(listOf("todo.text"), box.pending.value.map { it.kind })
+        // Another library plugs its kinds in later; what waited goes.
+        box.handle(setOf("todo.text")) { sent += it.kind }
+        eventually({ box.pending.value }) { it.isEmpty() }
+        assertEquals(listOf(Intent.READ, "todo.text"), sent.toList())
+    }
+
+    @Test
+    fun aFailureWaitsOneTwoFourUpToThirtySecondsAndLetsTheRestGo(): Unit = runBlocking {
+        assertEquals(listOf(1_000L, 2_000L, 4_000L, 8_000L, 16_000L, 30_000L, 30_000L), (1..7).map(IntentOutbox::backoff))
+        val box = outbox()
+        val failing = java.util.concurrent.atomic.AtomicBoolean(true)
+        box.handle(setOf(Intent.READ)) {
+            if (failing.get() && it.target == "a") error("unreachable")
+            sent += it.target
+        }
+        box.setOnline(true)
+        val a = box.enqueue(Intent.READ, "a")
+        eventually({ box.pending.value.firstOrNull { it.id == a.id }?.attempts }) { it == 1 }
+        assertEquals(clock.get() + 1_000, box.pending.value.single { it.id == a.id }.nextAttemptAt)
+        box.enqueue(Intent.READ, "b")
+        eventually({ sent.toList() }) { it == listOf("b") }
+        // Due again only once its wait is over.
+        failing.set(false)
+        clock.addAndGet(1_000)
+        box.kick()
+        eventually({ box.pending.value }) { it.isEmpty() }
+        assertEquals(listOf("b", "a"), sent.toList())
+    }
+
+    @Test
+    fun aRefusalDropsTheIntentAndSaysWhy(): Unit = runBlocking {
+        val box = outbox()
+        box.handle(setOf(Intent.ARCHIVE)) { throw IntentRefusal("Only the owner can archive this task.") }
+        val rejections = CopyOnWriteArrayList<IntentOutbox.Rejection>()
+        scope.launch { box.rejections.collect { rejections += it } }
+        delay(50)
+        val intent = box.enqueue(Intent.ARCHIVE, "t1")
+        assertEquals(setOf("t1"), IntentOverlay.of(box.pending.value).removed)
+        // A person waiting on it hears the reason; the notice is told it was heard.
+        assertEquals(IntentOutbox.Verdict.Refused("Only the owner can archive this task."), box.attempt(intent.id))
+        assertEquals(emptyList<Intent>(), box.pending.value)
+        eventually({ rejections.toList() }) { it.size == 1 }
+        assertTrue(rejections.single().heard)
+    }
+
+    @Test
+    fun aBackgroundRefusalBeforeTheCallerWaitsKeepsItsVerdict(): Unit = runBlocking {
+        val box = outbox()
+        box.handle(setOf(Intent.ARCHIVE)) { throw IntentRefusal("No") }
+        val intent = box.enqueue(Intent.ARCHIVE, "task")
+        box.setOnline(true)
+        eventually({ box.pending.value }) { it.isEmpty() }
+
+        assertEquals(IntentOutbox.Verdict.Refused("No"), box.attempt(intent.id))
+        assertEquals(IntentOutbox.Verdict.Refused("No"), box.verdict(intent.id))
+    }
+
+    @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun anAtomicFirstAttemptOwnsItsRefusalBeforeTheReadyDrainerCanTakeIt(): Unit = runTest {
+        val immediate = CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler))
+        val box = IntentOutbox(immediate, MemoryIntentStorage())
+        val rejections = mutableListOf<IntentOutbox.Rejection>()
+        immediate.launch { box.rejections.collect { rejections += it } }
+        val sent = mutableListOf<String>()
+        box.handle(setOf(Intent.LEAVE)) { sent += it.id; throw IntentRefusal("No") }
+        box.setOnline(true)
+
+        val answer = box.enqueueAndAttempt(Intent.LEAVE, "task")
+        runCurrent()
+        assertEquals(IntentOutbox.Verdict.Refused("No"), answer.verdict)
+        assertEquals(listOf(answer.intent.id), sent)
+        assertEquals(listOf(IntentOutbox.Rejection(answer.intent, "No", heard = true)), rejections)
+        assertEquals(emptyList<Intent>(), box.pending.value)
+    }
+
+    @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun aFirstAttemptThatCouldNotGoDoesNotHideALaterBackgroundRefusal(): Unit = runTest {
+        val box = IntentOutbox(backgroundScope, MemoryIntentStorage(), now = { testScheduler.currentTime })
+        val rejections = mutableListOf<IntentOutbox.Rejection>()
+        backgroundScope.launch { box.rejections.collect { rejections += it } }
+        var reachable = false
+        box.handle(setOf(Intent.LEAVE)) {
+            if (!reachable) throw java.io.IOException("offline")
+            throw IntentRefusal("No")
+        }
+        box.setOnline(true)
+        runCurrent()
+        assertEquals(IntentOutbox.Verdict.Waiting, box.enqueueAndAttempt(Intent.LEAVE, "task").verdict)
+        runCurrent()
+        assertEquals(emptyList<IntentOutbox.Rejection>(), rejections)
+
+        reachable = true
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertEquals(1, rejections.size)
+        assertEquals(false, rejections.single().heard)
+        assertEquals("No", rejections.single().reason)
+    }
+
+    @Test
+    fun completedVerdictsAreBoundedAndDoNotReplaceTheNextIntentsAnswer(): Unit = runBlocking {
+        val box = outbox()
+        box.handle(setOf(Intent.ARCHIVE)) { throw IntentRefusal(it.target) }
+        val first = box.enqueue(Intent.ARCHIVE, "first")
+        assertEquals(IntentOutbox.Verdict.Refused("first"), box.attempt(first.id))
+        repeat(IntentOutbox.COMPLETED_LIMIT) { index ->
+            val intent = box.enqueue(Intent.ARCHIVE, "task$index")
+            assertEquals(IntentOutbox.Verdict.Refused("task$index"), box.attempt(intent.id))
+        }
+        assertEquals(IntentOutbox.Verdict.Taken, box.verdict(first.id))
+    }
+
+    @Test
+    fun whatIsKeptOnTheDiskComesBackAfterARelaunch(): Unit = runBlocking {
+        val file = File(Files.createTempDirectory("intents").toFile(), "c1.intents.json")
+        val before = outbox(FileIntentStorage(file))
+        before.enqueue(Intent.READ, "a")
+        before.enqueue(Intent.LEAVE, "s1", buildJsonObject { put("kind", "surface") })
+        assertTrue(file.exists())
+        val after = outbox(FileIntentStorage(file))
+        eventually({ after.pending.value.map { it.kind to it.target } }) { it == listOf(Intent.READ to "a", Intent.LEAVE to "s1") }
+        assertEquals("surface", after.pending.value.last().of)
+        val ids = after.pending.value.map { it.id }
+        after.handle(setOf(Intent.READ, Intent.LEAVE)) { sent += it.target }
+        after.setOnline(true)
+        // What was sent is gone from the screen before it is gone from the disk; its verdict comes after both.
+        ids.forEach { assertEquals(IntentOutbox.Verdict.Taken, after.verdict(it)) }
+        assertTrue("nothing left to keep", !file.exists())
+    }
+
+    /**
+     * A sent intent leaves [IntentOutbox.pending] at once, before the store has
+     * written it away; its verdict waits for the store. So whoever needs the
+     * disk to agree waits on the verdict, not on pending.
+     */
+    @Test
+    fun aVerdictComesOnlyOnceTheStoreHasWrittenTheIntentAway(): Unit = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        val saved = CopyOnWriteArrayList<List<Intent>>()
+        val store = object : IntentStorage {
+            override suspend fun load() = emptyList<Intent>()
+            override suspend fun save(intents: List<Intent>) {
+                if (intents.isEmpty()) gate.await()
+                saved += intents
+            }
+        }
+        val box = outbox(store)
+        val intent = box.enqueue(Intent.READ, "a")
+        box.handle(setOf(Intent.READ)) { sent += it.target }
+        val verdict = async { box.verdict(intent.id) }
+        box.setOnline(true)
+        eventually({ box.pending.value }) { it.isEmpty() }
+        assertTrue("the store still holds it", saved.last().isNotEmpty())
+        assertFalse("no verdict while the store writes", verdict.isCompleted)
+        gate.complete(Unit)
+        assertEquals(IntentOutbox.Verdict.Taken, verdict.await())
+        assertTrue("the store has it gone", saved.last().isEmpty())
+    }
+}

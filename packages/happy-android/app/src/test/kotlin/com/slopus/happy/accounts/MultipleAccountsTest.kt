@@ -1,0 +1,285 @@
+package com.slopus.happy.accounts
+
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.slopus.happy.AppGraph
+import com.slopus.happy.auth.AuthCredentials
+import com.slopus.happy.auth.AuthState
+import com.slopus.happy.auth.ExpoSecureStore
+import com.slopus.happy.auth.SecureStoreCredentialStore
+import com.slopus.happy.config.ServerConfig
+import com.slopus.happy.config.LocalSettings
+import com.slopus.happy.crypto.Base64Variant
+import com.slopus.happy.crypto.SecretKeyBackup
+import com.slopus.happy.crypto.encodeBase64
+import com.slopus.happy.sync.eventually
+import com.slopus.happy.testing.FakeHappyServer
+import com.slopus.happy.testing.SoftwareKeys
+import com.slopus.happy.sync.SessionFileCache
+import com.slopus.happy.ui.theme.ThemePreference
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertSame
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import java.io.File
+
+/**
+ * Several Happy accounts on one phone, as on iOS: each on its own server
+ * with its own credentials and database, the React Native app's account
+ * first, switching keeping every account signed in.
+ */
+@RunWith(AndroidJUnit4::class)
+class MultipleAccountsTest {
+    private val context = ApplicationProvider.getApplicationContext<Context>()
+    private val keys = SoftwareKeys()
+    private val first = FakeHappyServer().start()
+    private val second = FakeHappyServer(ByteArray(32) { (it * 11 + 3).toByte() }).start()
+    private val graphs = mutableListOf<AppGraph>()
+
+    @Before
+    fun setUp() {
+        for (name in listOf(ExpoSecureStore.PREFS_NAME, AccountStore.PREFS_NAME, AccountStore.CREDENTIALS_PREFS_NAME, ServerConfig.PREFS_NAME, AccountRemovals.PREFS_NAME, LocalSettings.PREFS_NAME)) {
+            context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
+        }
+        File(context.filesDir, "mmkv").deleteRecursively()
+        first.addSession("a1", updatedAt = 100)
+        second.addSession("b1", updatedAt = 100)
+        second.addSession("b2", updatedAt = 200)
+    }
+
+    @After
+    fun tearDown() {
+        graphs.forEach { runBlocking { it.account.value?.stop(); it.awaitRemovals() } }
+        first.close()
+        second.close()
+    }
+
+    private fun graph(defaultServer: String = "https://default.invalid") =
+        AppGraph(context, "android/test", defaultServer, keys, databaseName = null).also { graphs += it; it.setForeground(true) }
+
+    private fun backup(server: FakeHappyServer) = SecretKeyBackup.format(encodeBase64(server.secret, Base64Variant.Url))
+
+    private fun openId(graph: AppGraph) = (graph.auth.state.value as? AuthState.SignedIn)?.let { accountId(it.credentials) }
+
+    private fun sessionIds(graph: AppGraph) = graph.store.sessions().map { it.id }.toSet()
+
+    private fun syncedTo(graph: AppGraph, ids: Set<String>) {
+        eventually(message = "sessions $ids") {
+            graph.account.value?.let { account ->
+                runBlocking {
+                    try {
+                        account.syncNow()
+                    } catch (e: CancellationException) {
+                        // Auth publishes before its observer replaces the account. A captured old
+                        // account may stop during sync; the next poll uses the replacement.
+                        if (graph.account.value === account) throw e
+                    }
+                }
+            }
+            sessionIds(graph) == ids
+        }
+    }
+
+    @Test
+    fun theReactNativeAccountAndServerOpenFirst() {
+        SecureStoreCredentialStore(ExpoSecureStore(context.getSharedPreferences(ExpoSecureStore.PREFS_NAME, Context.MODE_PRIVATE), keys))
+            .write(AuthCredentials(first.token, encodeBase64(first.secret, Base64Variant.Url)))
+        MmkvFixtures.write(MmkvFixtures.file(MmkvFixtures.region(listOf("custom-server-url" to first.url + "/"))), File(context.filesDir, "mmkv"))
+
+        val graph = graph()
+        val entry = graph.accountStore.registry.value.entries.single()
+        assertEquals(CredentialLocation.Shared, entry.location)
+        assertEquals(first.url, entry.serverUrl)
+        assertTrue(graph.auth.state.value is AuthState.SignedIn)
+        syncedTo(graph, setOf("a1"))
+    }
+
+    @Test
+    fun anUnreadableServerSettingKeepsTheTokenOffTheNetwork() {
+        SecureStoreCredentialStore(ExpoSecureStore(context.getSharedPreferences(ExpoSecureStore.PREFS_NAME, Context.MODE_PRIVATE), keys))
+            .write(AuthCredentials(first.token, encodeBase64(first.secret, Base64Variant.Url)))
+        MmkvFixtures.write("torn".toByteArray() to ByteArray(0), File(context.filesDir, "mmkv"))
+
+        val graph = graph(defaultServer = first.url)
+        assertFalse(graph.accountStore.registry.value.entries.single().serverConfirmed)
+        assertEquals(AuthState.SignedOut, graph.auth.state.value)
+        Thread.sleep(300)
+        assertTrue(first.requests.isEmpty())
+    }
+
+    @Test
+    fun addingSwitchingAndSigningOutKeepEachAccountApart() {
+        val graph = graph(defaultServer = first.url)
+        runBlocking { graph.auth.restore(backup(first)) }
+        syncedTo(graph, setOf("a1"))
+
+        // Add, from an open agent connection: a new account on the chosen server; the first stays signed in.
+        graph.accountStore.select("agent-connection-1")
+        runBlocking { graph.auth.reload() }
+        graph.serverConfig.set(second.url)
+        runBlocking { graph.auth.restore(backup(second)) }
+        syncedTo(graph, setOf("b1", "b2"))
+        val registry = graph.accountStore.registry.value
+        assertEquals(listOf(first.url, second.url), registry.ordered.map { it.serverUrl })
+        assertEquals(listOf(CredentialLocation.Shared, CredentialLocation.Own), registry.ordered.map { it.location })
+        val (a, b) = registry.ordered.map { it.id }
+        assertEquals(b, registry.activeId)
+
+        runBlocking { graph.open(a).join() }
+        eventually(message = "switched") { openId(graph) == a }
+        syncedTo(graph, setOf("a1"))
+
+        // A new start opens the account chosen last.
+        val again = graph(defaultServer = first.url)
+        assertEquals(a, again.accountStore.registry.value.activeId)
+        assertEquals(2, again.accountStore.registry.value.entries.size)
+
+        // Signing out of the open account opens the next; its data is still there.
+        runBlocking { graph.logout().join() }
+        eventually(message = "next account") { openId(graph) == b }
+        syncedTo(graph, setOf("b1", "b2"))
+        assertEquals(listOf(b), graph.accountStore.registry.value.entries.map { it.id })
+        assertNull(SecureStoreCredentialStore(ExpoSecureStore(context.getSharedPreferences(ExpoSecureStore.PREFS_NAME, Context.MODE_PRIVATE), keys)).read())
+
+        runBlocking { graph.logout().join() }
+        assertEquals(AuthState.SignedOut, graph.auth.state.value)
+        assertTrue(graph.accountStore.registry.value.entries.isEmpty())
+        assertTrue(sessionIds(graph).isEmpty())
+    }
+
+    @Test
+    fun anOpenAgentConnectionKeepsTheHappyAccountSignedIn() {
+        val graph = graph(defaultServer = first.url)
+        runBlocking { graph.auth.restore(backup(first)) }
+        val account = graph.accountStore.registry.value.activeId!!
+        val home = com.slopus.happy.ui.home.HomeServices.of(graph)
+        syncedTo(graph, setOf("a1"))
+        eventually(message = "Happy home loaded") { home.snapshots.value?.sessions?.any { it.id == "a1" } == true }
+        eventually(message = "Happy list loaded") { home.list.state.value != null }
+        // An agent connection opens: no Happy account is open, none is signed out.
+        graph.accountStore.select("agent-connection-1")
+        runBlocking { graph.auth.reload() }
+        assertEquals(AuthState.SignedOut, graph.auth.state.value)
+        eventually(message = "Happy home released on switch") { home.snapshots.value == null }
+        eventually(message = "Happy list released on switch") { home.list.state.value == null }
+        assertEquals("agent-connection-1", graph(defaultServer = first.url).accountStore.registry.value.activeId)
+        assertEquals(listOf(account), graph.accountStore.registry.value.entries.map { it.id })
+        runBlocking { graph.open(account).join() }
+        eventually(message = "account again") { openId(graph) == account }
+        eventually(message = "Happy home restored") { home.snapshots.value?.sessions?.any { it.id == "a1" } == true }
+    }
+
+    @Test
+    fun aTerminalLinkGoesToTheHappyAccountOpenLastEvenAfterARestart() {
+        val graph = graph(defaultServer = first.url)
+        assertNull(graph.accountStore.registry.value.forTerminal())
+        runBlocking { graph.auth.restore(backup(first)) }
+        val a = graph.accountStore.registry.value.activeId!!
+        graph.accountStore.select("agent-connection-1")
+        runBlocking { graph.auth.reload() }
+        graph.serverConfig.set(second.url)
+        runBlocking { graph.auth.restore(backup(second)) }
+        val b = graph.accountStore.registry.value.activeId!!
+        // The open one while it is open, then the one open last while an agent connection is.
+        assertEquals(b, graph.accountStore.registry.value.forTerminal()?.id)
+        runBlocking { graph.open(a).join() }
+        graph.accountStore.select("agent-connection-1")
+        assertEquals(a, graph.accountStore.registry.value.forTerminal()?.id)
+        assertEquals(a, graph(defaultServer = first.url).accountStore.registry.value.forTerminal()?.id)
+        // Signed out of it, the other.
+        graph.accountStore.remove(a)
+        assertEquals(b, graph.accountStore.registry.value.forTerminal()?.id)
+    }
+
+    @Test
+    fun removingAnInactiveAccountLeavesTheOpenAccountsSyncFilesAndPreferencesAlone() {
+        val graph = graph(defaultServer = first.url)
+        runBlocking { graph.auth.restore(backup(first)) }
+        syncedTo(graph, setOf("a1"))
+        val a = graph.accountStore.registry.value.activeId!!
+        // Add the second through the same path as Restore from an agent connection.
+        graph.accountStore.select("agent-connection-1")
+        runBlocking { graph.auth.reload() }
+        graph.serverConfig.set(second.url)
+        runBlocking { graph.auth.restore(backup(second)) }
+        syncedTo(graph, setOf("b1", "b2"))
+        val b = graph.accountStore.registry.value.activeId!!
+        val running = graph.account.value
+        val signedIn = graph.auth.state.value
+        graph.localSettings.setThemePreference(ThemePreference.Dark)
+        val removedFiles = SessionFileCache.directory(context.noBackupFilesDir, a).apply { mkdirs() }
+        File(removedFiles, "old").writeText("old")
+        val keptFiles = SessionFileCache.directory(context.noBackupFilesDir, b).apply { mkdirs() }
+        val kept = File(keptFiles, "current").apply { writeText("current") }
+        // These fake servers deliberately issue the same public id. Their
+        // shared legacy media folder must survive while either owner remains.
+        val sharedMedia = graph.legacyMediaDirectory("account-1")!!.apply { mkdirs() }
+        val media = File(sharedMedia, "current").apply { writeText("media") }
+        val removals = mutableListOf<Triple<String, String, Boolean>>()
+        graph.beforeAccountRemoval { token, server, open -> removals += Triple(token, server, open) }
+        graph.beforeLogout { _, _ -> error("the open account must not sign out") }
+
+        runBlocking { graph.logout(a).join(); graph.awaitRemovals() }
+        assertEquals(listOf(b), graph.accountStore.registry.value.entries.map { it.id })
+        assertEquals(b, graph.accountStore.registry.value.activeId)
+        assertEquals(signedIn, graph.auth.state.value)
+        assertSame(running, graph.account.value)
+        assertEquals(setOf("b1", "b2"), sessionIds(graph))
+        assertEquals(ThemePreference.Dark, graph.localSettings.themePreference.value)
+        assertEquals(listOf(Triple(first.token, first.url, false)), removals)
+        assertNull(graph.accountStore.credentials(a))
+        assertFalse(removedFiles.exists())
+        assertEquals("current", kept.readText())
+        assertEquals("media", media.readText())
+        // A stale row tap cannot select the account after it has gone.
+        runBlocking { graph.open(a).join() }
+        assertEquals(b, graph.accountStore.registry.value.activeId)
+        assertSame(running, graph.account.value)
+    }
+
+    @Test
+    fun removingTheLastInactiveCliAccountKeepsTheSelectedAgentAndItsPreferencesAfterARestart() {
+        val graph = graph(defaultServer = first.url)
+        runBlocking { graph.auth.restore(backup(first)) }
+        val id = graph.accountStore.registry.value.activeId!!
+        graph.accountStore.select("agent-connection-1")
+        runBlocking { graph.auth.reload() }
+        graph.localSettings.setThemePreference(ThemePreference.Dark)
+        // Killed after journalling an inactive removal, while the agent stays selected.
+        AccountRemovals(context.getSharedPreferences(AccountRemovals.PREFS_NAME, Context.MODE_PRIVATE)).begin(id)
+        val again = graph(defaultServer = first.url)
+        assertEquals("agent-connection-1", again.accountStore.registry.value.activeId)
+        assertEquals(ThemePreference.Dark, again.localSettings.themePreference.value)
+        assertTrue(again.accountStore.registry.value.entries.isEmpty())
+        assertNull(again.accountStore.credentials(id))
+        assertTrue(AccountRemovals(context.getSharedPreferences(AccountRemovals.PREFS_NAME, Context.MODE_PRIVATE)).pending().isEmpty())
+    }
+
+    @Test
+    fun aSignOutTheProcessDidntLiveToFinishIsFinishedAtTheNextStart() {
+        val graph = graph(defaultServer = first.url)
+        runBlocking { graph.auth.restore(backup(first)) }
+        graph.accountStore.select("agent-connection-1")
+        runBlocking { graph.auth.reload() }
+        graph.serverConfig.set(second.url)
+        runBlocking { graph.auth.restore(backup(second)) }
+        val (a, b) = graph.accountStore.registry.value.ordered.map { it.id }
+        assertEquals(b, graph.accountStore.registry.value.activeId)
+        // Killed right after the sign-out of b was written down, before its credentials went.
+        AccountRemovals(context.getSharedPreferences(AccountRemovals.PREFS_NAME, Context.MODE_PRIVATE)).begin(b)
+
+        val again = graph(defaultServer = first.url)
+        // b never comes back: the next start opens a, as the sign-out would have.
+        assertEquals(listOf(a), again.accountStore.registry.value.entries.map { it.id })
+        assertEquals(a, openId(again))
+        assertTrue(AccountRemovals(context.getSharedPreferences(AccountRemovals.PREFS_NAME, Context.MODE_PRIVATE)).pending().isEmpty())
+    }
+}

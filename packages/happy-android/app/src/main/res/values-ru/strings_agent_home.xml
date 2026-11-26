@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  values/strings_agent_home.xml in ru: Android-only strings, not in happy-app's
+  catalogs. AndroidStringsTranslatedTest fails while one is missing here.
+-->
+<resources>
+    <string name="agent_home_working">Работает…</string>
+    <string name="agent_home_empty_title">Пока нет разговоров</string>
+    <string name="agent_home_empty_body">Начните чат с этим агентом, и он появится здесь.</string>
+    <string name="agent_home_revoked">Этот телефон удалён в Happy Agent. Подключите агента снова, чтобы им пользоваться.</string>
+    <string name="agent_home_update_required">Этому агенту нужна более новая версия Happy. Обновите приложение, чтобы им пользоваться.</string>
+    <string name="agent_artifacts_untitled">Без названия</string>
+    <string name="agent_surface_add_todo">Добавить задачу</string>
+    <string name="agent_surface_no_todos">Здесь пока ничего нет.</string>
+    <string name="agent_surface_todo_done">готово</string>
+    <string name="agent_surface_empty_document">Этот документ пуст.</string>
+    <string name="agent_surface_open_on_computer">Откройте это на компьютере, чтобы пользоваться.</string>
+    <string name="agent_surface_failed">Не удалось прочитать</string>
+    <string name="agent_search_clear">Очистить</string>
+    <string name="agent_search_actions">Быстрые действия</string>
+    <string name="agent_search_open_settings">Открыть настройки</string>
+    <string name="agent_search_todos">Задачи</string>
+    <string name="agent_search_kind_todo">Список задач</string>
+    <string name="agent_search_kind_document">Документ</string>
+    <string name="agent_search_kind_calendar">Календарь</string>
+    <string name="agent_search_kind_system_monitor">Системный монитор</string>
+    <string name="agent_search_kind_chat">Чат</string>
+    <string name="agent_search_kind_web_page">Веб-страница</string>
+    <string name="agent_search_kind_image">Изображение</string>
+    <string name="agent_search_kind_image_series">Серия изображений</string>
+    <string name="agent_search_kind_video">Видео</string>
+    <string name="agent_search_kind_artifact">Артефакт</string>
+    <string name="agent_search_kind_shared">Общее</string>
+    <string name="agent_search_by_agent">Агент</string>
+    <string name="agent_search_task_not_joined">Задача, в которой вы не участвуете</string>
+    <string name="agent_search_not_joined">вы не участник</string>
+    <plurals name="agent_search_open_todos">
+        <item quantity="one">%d открыта</item>
+        <item quantity="few">%d открыты</item>
+        <item quantity="many">%d открыто</item>
+        <item quantity="other">%d открыто</item>
+    </plurals>
+    <string name="agent_settings_edit_name">Изменить имя агента</string>
+    <string name="agent_settings_edit_avatar">Изменить аватар агента</string>
+    <string name="agent_settings_edit_name_prefix">"Смени своё имя на "</string>
+    <string name="agent_settings_edit_avatar_prefix">"Смени свой аватар на "</string>
+    <string name="agent_settings_connected">Подключено</string>
+    <string name="agent_settings_connecting">Подключение</string>
+    <string name="agent_settings_revoked">Удалён из Happy Agent</string>
+    <string name="agent_settings_update">Требуется обновление</string>
+    <string name="agent_settings_remove_message">Happy забудет этого агента на этом телефоне. Happy Agent будет показывать телефон, пока вы не удалите его и там.</string>
+</resources>

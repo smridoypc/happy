@@ -1,0 +1,286 @@
+import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
+/// Web pages always use the remote network, never the phone's network.
+public enum BrowserPolicy {
+    public enum Route: Equatable, Sendable { case web, system }
+
+    public static func route(_ url: URL) -> Route {
+        guard ["http", "https", "ws", "wss"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return .system }
+        return .web
+    }
+
+    /// Where a link opens when `connected` says whether an agent
+    /// connection is there to open it through. Without one (a Happy
+    /// account's relay chats, whose legacy CLI has no proxy, or signed
+    /// out) the in-app browser can only fail, so a page goes to the
+    /// system's browser, as happy-app opened every link. A loopback page
+    /// stays: there it would be the phone's own, so it says there is no
+    /// connection instead.
+    public static func route(_ url: URL, connected: Bool) -> Route {
+        guard route(url) == .web, !connected else { return route(url) }
+        guard let authority = Authority(url: url) else { return .system }
+        return isPhoneOwn(authority) ? .web : .system
+    }
+
+    /// The phone's own machine as a link names it: its loopback or `0.0.0.0`.
+    private static func isPhoneOwn(_ authority: Authority) -> Bool {
+        var host = authority.host
+        if host.hasPrefix("::ffff:") { host.removeFirst(7) }
+        if ["localhost", "::1", "0.0.0.0", "::"].contains(host) || host.hasSuffix(".localhost") { return true }
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        return parts.count == 4 && parts[0] == "127" && parts.allSatisfy { UInt8($0) != nil }
+    }
+
+    /// Addresses WebKit resolves inside the page, with nothing to fetch:
+    /// a blank or srcdoc frame, data and blob URLs, `javascript:` links.
+    public static func isInPage(_ url: URL) -> Bool {
+        ["about", "data", "blob", "javascript"].contains(url.scheme?.lowercased() ?? "")
+    }
+
+    public static func normalize(_ host: String) -> String {
+        let host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]."))
+        // Browsers canonicalize legacy IPv4 spellings before CONNECT. Match the
+        // same authority for 127.1, octal/hex and integer loopback addresses.
+        var address = in_addr()
+        if host.withCString({ inet_aton($0, &address) }) == 1 {
+            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            if inet_ntop(AF_INET, &address, &buffer, socklen_t(buffer.count)) != nil { return String(cString: buffer) }
+        }
+        var ipv6 = in6_addr()
+        if host.withCString({ inet_pton(AF_INET6, $0, &ipv6) }) == 1 {
+            var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            if inet_ntop(AF_INET6, &ipv6, &buffer, socklen_t(buffer.count)) != nil { return String(cString: buffer) }
+        }
+        return host
+    }
+
+    public struct Authority: Equatable, Sendable {
+        public let host: String
+        public let port: UInt16
+        public init?(url: URL) {
+            guard let host = url.host, url.user == nil, url.password == nil,
+                  ["http", "https", "ws", "wss"].contains(url.scheme?.lowercased() ?? ""),
+                  let port = UInt16(exactly: url.port ?? (["https", "wss"].contains(url.scheme ?? "") ? 443 : 80)), port > 0 else { return nil }
+            let normalized = BrowserPolicy.normalize(host)
+            guard !normalized.isEmpty, normalized.utf8.count <= 253,
+                  normalized.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || "-._:".utf8.contains($0) }) else { return nil }
+            self.host = normalized; self.port = port
+        }
+        public var text: String { "\(literal):\(port)" }
+        /// The host as a URL or Host field writes it: IPv6 in brackets.
+        public var literal: String { host.contains(":") ? "[\(host)]" : host }
+    }
+
+    /// WebKit connects to the phone's own loopback directly, whatever the
+    /// proxy says, so a page there opens on an alias only the proxy knows,
+    /// and the proxy tunnels the alias to the computer's own loopback.
+    public enum Loopback {
+        private static let aliases = ["127.0.0.1": "ipv4", "::1": "ipv6", "localhost": "name"]
+        private static let suffix = ".happy-loopback.invalid"
+
+        /// `url` on its alias, if it names the loopback; nil for any other.
+        public static func alias(_ url: URL) -> URL? {
+            guard route(url) == .web, let host = url.host, let label = aliases[normalize(host)] else { return nil }
+            return replacingHost(url, with: label + suffix)
+        }
+
+        /// The computer's loopback an alias stands for, at the same port.
+        public static func target(_ authority: Authority) -> Authority? {
+            guard let host = original(authority.host) else { return nil }
+            return URL(string: "http://\(literal(host)):\(authority.port)").flatMap(Authority.init(url:))
+        }
+
+        /// The address as the link gave it, for a person to read or copy.
+        public static func shown(_ url: URL) -> URL {
+            guard let host = url.host.flatMap(original) else { return url }
+            return replacingHost(url, with: literal(host)) ?? url
+        }
+
+        private static func literal(_ host: String) -> String { host.contains(":") ? "[\(host)]" : host }
+
+        private static func original(_ host: String) -> String? {
+            aliases.first { $0.value + suffix == host.lowercased() }?.key
+        }
+
+        private static func replacingHost(_ url: URL, with host: String) -> URL? {
+            guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+            components.percentEncodedHost = host
+            return components.url
+        }
+    }
+
+    /// Paths are checked before Foundation can normalize traversal away.
+    public static func artifactPath(target: String, artifactID: String, version: Int) throws -> String {
+        try path(target: target, files: .artifact(id: artifactID, version: version))
+    }
+
+    /// Where a page's request for `target` goes on the daemon: a file of
+    /// `files`, or an artifact's `/api/*` data bridge, which a vault
+    /// artifact has none of, so its `/api/…` paths are files like any other.
+    public static func path(target: String, files: BrowserFiles) throws -> String {
+        guard files.valid, target.hasPrefix("/"), !target.hasPrefix("//"),
+              !target.utf8.contains(where: { $0 < 33 || $0 == 127 }), !target.contains("#") else { throw BrowserError.forbidden }
+        let path = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)[0]
+        for part in path.dropFirst().split(separator: "/", omittingEmptySubsequences: false) {
+            guard let decoded = String(part).removingPercentEncoding, decoded != ".", decoded != "..",
+                  !decoded.contains("/"), !decoded.contains("\\"), !decoded.contains("%"),
+                  !decoded.utf8.contains(where: { $0 < 32 || $0 == 127 }) else { throw BrowserError.forbidden }
+        }
+        switch files {
+        case .artifact(let id, let version):
+            let prefix = "/v0/artifacts/\(id)"
+            if path.hasPrefix("/api/") { return prefix + target }
+            guard path != "/api", path != "/" else { throw BrowserError.forbidden }
+            return "\(prefix)/versions/\(version)/files\(target)"
+        case .vault(let surfaceId, let entryId, let version):
+            guard path != "/" else { throw BrowserError.forbidden }
+            return "/v0/surfaces/vault/\(surfaceId)/files/\(entryId)/versions/\(version)/artifact\(target)"
+        }
+    }
+
+    /// A `networkId` (happy-agent API.md): 1 to 128 lowercase letters and
+    /// digits, plus `-` and `_` after the first. Opaque: never parsed.
+    public static func validNetworkID(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        guard (1...128).contains(bytes.count), (97...122).contains(bytes[0]) || (48...57).contains(bytes[0]) else { return false }
+        return bytes.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95 }
+    }
+
+    public static func validID(_ value: String) -> Bool {
+        guard let first = value.utf8.first, (97...122).contains(first) else { return false }
+        return value.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) }
+    }
+
+    public static func checkArtifactOrigin(_ head: BrowserHTTPHead, authority: Authority) throws {
+        if let site = head.value("Sec-Fetch-Site"), !["same-origin", "none"].contains(site.lowercased()) { throw BrowserError.forbidden }
+        if let origin = head.value("Origin") {
+            guard let url = URL(string: origin), url.scheme == "http", Authority(url: url) == authority else { throw BrowserError.forbidden }
+        }
+    }
+}
+
+/// Whose files an isolated page origin serves.
+public enum BrowserFiles: Equatable, Sendable {
+    /// An artifact version: its files, and its `/api/*` data bridge.
+    case artifact(id: String, version: Int)
+    /// One version of a vault's artifact entry: its files only.
+    case vault(surfaceId: String, entryId: String, version: Int)
+
+    var valid: Bool {
+        switch self {
+        case .artifact(let id, let version): BrowserPolicy.validID(id) && version > 0
+        case .vault(let surfaceId, let entryId, let version): BrowserPolicy.validID(surfaceId) && BrowserPolicy.validID(entryId) && version > 0
+        }
+    }
+
+    /// Whether a page's `/api/*` reaches the artifact data bridge.
+    var bridges: Bool { if case .artifact = self { return true } else { return false } }
+}
+
+public enum BrowserError: Error, Equatable, Sendable {
+    case forbidden, malformed, tooLarge, unavailable, timeout, upstream(Int)
+    /// The server's network carries neither CONNECT nor WebSocket tunnels.
+    case tunnelsBlocked
+    /// A live artifact's own proxy refused to open: the artifact is gone or
+    /// no longer live, or the network it was made on isn't served now.
+    case liveUnavailable
+    /// The agent's compute is gone (detached, offline or draining): a
+    /// tunnel refused with one of `BrowserCompute.gone`'s codes.
+    case computeGone
+    /// The network refused the destination as one it doesn't carry
+    /// (`403 destination_not_allowed`): Happy Cloud's tunnels reach only
+    /// the computer's loopback.
+    case outsideNetwork
+}
+
+/// A bounded HTTP head, preserving duplicate response fields (notably Set-Cookie).
+public struct BrowserHTTPHead: Sendable {
+    public var line: String
+    public var fields: [(String, String)]
+    public func value(_ name: String) -> String? { fields.first { $0.0.lowercased() == name.lowercased() }?.1 }
+    public var data: Data { Data(([line] + fields.map { "\($0.0): \($0.1)" } + ["", ""]).joined(separator: "\r\n").utf8) }
+
+    public static func parse(_ data: Data) throws -> (BrowserHTTPHead, Data)? {
+        guard let end = data.range(of: Data("\r\n\r\n".utf8)) else {
+            guard data.count <= 32768 else { throw BrowserError.tooLarge }; return nil
+        }
+        guard end.lowerBound - data.startIndex <= 32768,
+              let text = String(data: data[..<end.lowerBound], encoding: .utf8) else { throw BrowserError.malformed }
+        let lines = text.components(separatedBy: "\r\n")
+        guard let line = lines.first, !line.isEmpty else { throw BrowserError.malformed }
+        var fields: [(String, String)] = []
+        for field in lines.dropFirst() {
+            guard let colon = field.firstIndex(of: ":") else { throw BrowserError.malformed }
+            let name = String(field[..<colon])
+            let value = field[field.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty, name.utf8.allSatisfy({ (33...126).contains($0) && !"()<>@,;:\\\"/[]?={} ".utf8.contains($0) }),
+                  !value.utf8.contains(where: { $0 < 32 && $0 != 9 || $0 == 127 }) else { throw BrowserError.malformed }
+            fields.append((name, value))
+        }
+        return (BrowserHTTPHead(line: line, fields: fields), Data(data[end.upperBound...]))
+    }
+
+    public func artifactRequest(artifactID: String, version: Int, credential: String, keepAlive: Bool = false, authority: String = "server.tailcat") throws -> BrowserHTTPHead {
+        try filesRequest(.artifact(id: artifactID, version: version), credential: credential, keepAlive: keepAlive, authority: authority)
+    }
+
+    /// The page's request for one of `files`, as the daemon takes it.
+    public func filesRequest(_ files: BrowserFiles, credential: String, keepAlive: Bool = false, authority: String = "server.tailcat") throws -> BrowserHTTPHead {
+        let parts = line.split(separator: " ")
+        guard parts.count == 3, parts[2] == "HTTP/1.1", parts[0] != "CONNECT",
+              parts[0].utf8.allSatisfy({ (65...90).contains($0) }),
+              !credential.contains("\r"), !credential.contains("\n") else { throw BrowserError.malformed }
+        let target = try BrowserPolicy.path(target: String(parts[1]), files: files)
+        let stripped: Set<String> = ["host", "authorization", "proxy-authorization", "proxy-connection", "connection", "x-happy-proxy-route", "expect"]
+        var fields = self.fields.filter { !stripped.contains($0.0.lowercased()) }
+        fields += [("Host", authority), ("Authorization", "Bearer \(credential)"), ("Connection", value("upgrade") == nil ? (keepAlive ? "keep-alive" : "close") : "Upgrade")]
+        return BrowserHTTPHead(line: "\(parts[0]) \(target) HTTP/1.1", fields: fields)
+    }
+
+    /// The page's request as the computer's loopback takes it: the alias in
+    /// Host, Origin and Referer named `host` again, so a dev server that
+    /// checks them (Vite, Next) answers.
+    public func loopbackRequest(alias: String, host: String) -> BrowserHTTPHead {
+        func replacing(_ value: String, from start: String.Index) -> String {
+            guard value[start...].lowercased().hasPrefix(alias) else { return value }
+            let end = value.index(start, offsetBy: alias.count)
+            guard end == value.endIndex || ":/?#".contains(value[end]) else { return value }
+            return value.replacingCharacters(in: start..<end, with: host)
+        }
+        var result = self
+        result.fields = fields.map { name, value in
+            switch name.lowercased() {
+            case "host": return (name, replacing(value, from: value.startIndex))
+            case "origin", "referer": return (name, value.range(of: "://").map { replacing(value, from: $0.upperBound) } ?? value)
+            default: return (name, value)
+            }
+        }
+        return result
+    }
+
+    public func artifactResponse() -> BrowserHTTPHead {
+        var result = self
+        // The daemon uses an opaque sandbox on its privileged origin. This
+        // isolated origin needs same-origin for fetch, SSE and browser storage.
+        result.fields.removeAll { $0.0.lowercased() == "connection" }
+        var sandboxed = false
+        result.fields = result.fields.map { name, value in
+            guard name.lowercased() == "content-security-policy" else { return (name, value) }
+            let directives = value.components(separatedBy: ";").map { directive in
+                let words = directive.split(whereSeparator: { $0.isWhitespace })
+                guard words.first?.lowercased() == "sandbox" else { return directive }
+                sandboxed = true
+                return words.contains("allow-same-origin") ? directive : directive + " allow-same-origin"
+            }
+            return (name, directives.joined(separator: ";"))
+        }
+        if !sandboxed { result.fields.append(("Content-Security-Policy", "sandbox allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads")) }
+        result.fields.append(("Connection", value("upgrade") == nil ? "close" : "Upgrade"))
+        return result
+    }
+}

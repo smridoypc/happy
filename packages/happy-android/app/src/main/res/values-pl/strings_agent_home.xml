@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  values/strings_agent_home.xml in pl: Android-only strings, not in happy-app's
+  catalogs. AndroidStringsTranslatedTest fails while one is missing here.
+-->
+<resources>
+    <string name="agent_home_working">Pracuje…</string>
+    <string name="agent_home_empty_title">Brak rozmów</string>
+    <string name="agent_home_empty_body">Rozpocznij czat z tym agentem, a pojawi się tutaj.</string>
+    <string name="agent_home_revoked">Ten telefon został usunięty w Happy Agent. Połącz agenta ponownie, aby z niego korzystać.</string>
+    <string name="agent_home_update_required">Ten agent wymaga nowszej wersji Happy. Zaktualizuj aplikację, aby z niego korzystać.</string>
+    <string name="agent_artifacts_untitled">Bez tytułu</string>
+    <string name="agent_surface_add_todo">Dodaj zadanie</string>
+    <string name="agent_surface_no_todos">Na razie nic tu nie ma.</string>
+    <string name="agent_surface_todo_done">zrobione</string>
+    <string name="agent_surface_empty_document">Ten dokument jest pusty.</string>
+    <string name="agent_surface_open_on_computer">Otwórz to na komputerze, aby z tego korzystać.</string>
+    <string name="agent_surface_failed">Nie udało się tego odczytać</string>
+    <string name="agent_search_clear">Wyczyść</string>
+    <string name="agent_search_actions">Szybkie akcje</string>
+    <string name="agent_search_open_settings">Otwórz ustawienia</string>
+    <string name="agent_search_todos">Zadania</string>
+    <string name="agent_search_kind_todo">Lista zadań</string>
+    <string name="agent_search_kind_document">Dokument</string>
+    <string name="agent_search_kind_calendar">Kalendarz</string>
+    <string name="agent_search_kind_system_monitor">Monitor systemu</string>
+    <string name="agent_search_kind_chat">Czat</string>
+    <string name="agent_search_kind_web_page">Strona internetowa</string>
+    <string name="agent_search_kind_image">Obraz</string>
+    <string name="agent_search_kind_image_series">Seria obrazów</string>
+    <string name="agent_search_kind_video">Wideo</string>
+    <string name="agent_search_kind_artifact">Artefakt</string>
+    <string name="agent_search_kind_shared">Udostępnione</string>
+    <string name="agent_search_by_agent">Agent</string>
+    <string name="agent_search_task_not_joined">Zadanie, do którego nie dołączono</string>
+    <string name="agent_search_not_joined">nie dołączono</string>
+    <plurals name="agent_search_open_todos">
+        <item quantity="one">%d otwarte</item>
+        <item quantity="few">%d otwarte</item>
+        <item quantity="many">%d otwartych</item>
+        <item quantity="other">%d otwartego</item>
+    </plurals>
+    <string name="agent_settings_edit_name">Zmień nazwę agenta</string>
+    <string name="agent_settings_edit_avatar">Zmień awatar agenta</string>
+    <string name="agent_settings_edit_name_prefix">"Zmień swoją nazwę na "</string>
+    <string name="agent_settings_edit_avatar_prefix">"Zmień swój awatar na "</string>
+    <string name="agent_settings_connected">Połączono</string>
+    <string name="agent_settings_connecting">Łączenie</string>
+    <string name="agent_settings_revoked">Usunięto z Happy Agent</string>
+    <string name="agent_settings_update">Wymagana aktualizacja</string>
+    <string name="agent_settings_remove_message">Happy zapomni tego agenta na tym telefonie. Happy Agent będzie wyświetlać telefon, dopóki nie usuniesz go także tam.</string>
+</resources>

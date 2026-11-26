@@ -1,0 +1,206 @@
+package com.slopus.happy
+
+import android.content.Intent
+import com.slopus.happy.connection.ServerSignInFlow
+import com.slopus.happy.diagnostics.Timing
+import android.os.Build
+import android.os.Bundle
+import android.view.View
+import android.view.ViewTreeObserver
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.slopus.happy.push.BackgroundSendNotifications
+import com.slopus.happy.ui.AfterStart
+import com.slopus.happy.ui.FirstFrame
+import com.slopus.happy.ui.HappyApp
+import com.slopus.happy.ui.LocalAfterStart
+import com.slopus.happy.ui.connect.DeepLinks
+import com.slopus.happy.ui.start.StartWarmup
+import com.slopus.happy.ui.theme.AppNightMode
+import com.slopus.happy.ui.theme.paintWindow
+import androidx.profileinstaller.ProfileInstaller
+import androidx.navigation.NavHostController
+import androidx.navigation.NavDestination.Companion.hasRoute
+import androidx.navigation.toRoute
+import com.slopus.happy.ui.conversation.ConversationRoute
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.android.awaitFrame
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlin.coroutines.resume
+
+class MainActivity : ComponentActivity() {
+    /** Null until the graph is built off the main thread ([HappyApplication.graphReady]). */
+    private val graph = MutableStateFlow<AppGraph?>(null)
+
+    /** [AfterStart]: the opening screen fully drawn (or [START_GRACE_MS] without it), and one frame more. */
+    private val started = CompletableDeferred<Unit>()
+    private val afterStart = AfterStart { started.await() }
+    private var navigation: NavHostController? = null
+    private var restoredChat: Pair<String, String>? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
+        restoredChat = savedInstanceState?.getString("openChat.connection")?.let { connection ->
+            savedInstanceState.getString("openChat.agent")?.let { connection to it }
+        }
+        MaxRefreshRate.follow(this)
+        if (savedInstanceState == null && !oauthCallback(intent)) DeepLinks.offer(intent)
+        val ready = (application as HappyApplication).graphReady
+        // The first frame waits for the graph (the system's splash stays up meanwhile); the main thread doesn't.
+        if (!ready.isCompleted) holdFirstFrame()
+        lifecycleScope.launch {
+            val built = ready.await()
+            seedChat(built)
+            graph.value = built
+            // Start's shaders and grain, made off the main thread while its first frame is put together.
+            if (built.openAccount.value == OpenAccount.None) StartWarmup.warm(this@MainActivity)
+            BackgroundSendNotifications.start(this@MainActivity, built)
+            // The platform's night mode is the app's theme setting, kept by the system for the next start.
+            launch(Dispatchers.IO) { built.localSettings.themePreference.collect { AppNightMode.apply(applicationContext, it) } }
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                built.setForeground(true)
+                built.requestSync()
+                try {
+                    awaitCancellation()
+                } finally {
+                    built.setForeground(false)
+                }
+            }
+        }
+        // Glass blurs from the second frame (FirstFrame); API 29's commit callback says when the first is drawn.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            FirstFrame.pending()
+            // Posted, so it runs once the window is attached and lands on its own tree observer.
+            window.decorView.post {
+                window.decorView.viewTreeObserver.registerFrameCommitCallback {
+                    Timing.mark("first_frame")
+                    FirstFrame.done()
+                }
+            }
+        }
+        lifecycleScope.launch {
+            withTimeoutOrNull(START_GRACE_MS) { fullyDrawn() }
+            awaitFrame()
+            started.complete(Unit)
+            // What ProfileInstallerInitializer did before the first frame, now after it, as late as it did its work.
+            delay(PROFILE_DELAY_MS)
+            withContext(Dispatchers.IO) { ProfileInstaller.writeProfile(applicationContext) }
+        }
+        setContent {
+            val shown by graph.collectAsState()
+            shown?.let { CompositionLocalProvider(LocalAfterStart provides afterStart) {
+                HappyApp(it, onNavigationReady = ::navigationReady, onDarkThemeChange = ::showTheme)
+            } }
+        }
+    }
+
+    private fun seedChat(built: AppGraph) {
+        restoredChat?.let { (connection, agent) -> built.agentSessions.setOpenChat(connection, agent) }
+        restoredChat = null
+    }
+
+    private fun navigationReady(nav: NavHostController) {
+        if (navigation === nav) return
+        navigation = nav
+        nav.addOnDestinationChangedListener { controller, _, _ ->
+            val entry = controller.currentBackStackEntry
+            val chat = entry?.takeIf { it.destination.hasRoute<ConversationRoute>() }?.toRoute<ConversationRoute>()
+            graph.value?.agentSessions?.setOpenChat(chat?.connectionId, chat?.agentId)
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        val chat = navigation?.currentBackStackEntry?.takeIf { it.destination.hasRoute<ConversationRoute>() }?.toRoute<ConversationRoute>()
+        chat?.agentId?.let { agent ->
+            outState.putString("openChat.connection", chat.connectionId)
+            outState.putString("openChat.agent", agent)
+        }
+        super.onSaveInstanceState(outState)
+    }
+
+    private var shownDark: Boolean? = null
+
+    /** [HappyApp]'s theme, before its first frame is drawn and on every change ([paintWindow]). */
+    private fun showTheme(dark: Boolean) {
+        if (shownDark == dark) return
+        shownDark = dark
+        paintWindow(dark)
+    }
+
+    /** Both homes and the first screen report it once their rows (or loader) are drawn. */
+    private suspend fun fullyDrawn() = suspendCancellableCoroutine { done ->
+        val listener: () -> Unit = { if (done.isActive) done.resume(Unit) }
+        fullyDrawnReporter.addOnReportDrawnListener(listener)
+        done.invokeOnCancellation { fullyDrawnReporter.removeOnReportDrawnListener(listener) }
+    }
+
+    /**
+     * Before the window's views attach, so before its first composition. The graph is
+     * usually built by now, but the main thread is only told by a message that runs
+     * after the first traversal; without this, that traversal composes an empty window,
+     * [holdFirstFrame] cancels its draw, and home is drawn a traversal later.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        val ready = (application as HappyApplication).graphReady
+        if (graph.value == null && ready.isCompleted && ready.getCompletionExceptionOrNull() == null) {
+            val built = ready.getCompleted()
+            seedChat(built)
+            graph.value = built
+        }
+    }
+
+    private fun holdFirstFrame() {
+        val content = findViewById<View>(android.R.id.content)
+        content.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                if (graph.value == null) return false
+                content.viewTreeObserver.removeOnPreDrawListener(this)
+                return true
+            }
+        })
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (!oauthCallback(intent)) DeepLinks.offer(intent)
+    }
+
+    /**
+     * The browser coming back to a team server sign-in
+     * ([ServerSignInFlow.REDIRECT_URI]): handed to the sign-in in progress,
+     * if this process still has it (its verifier was in memory only), and
+     * never treated as a Happy link. Bringing this activity up closes the
+     * Custom Tab above it (singleTask).
+     */
+    private fun oauthCallback(intent: Intent?): Boolean {
+        val uri = intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString ?: return false
+        if (!ServerSignInFlow.isRedirect(uri)) return false
+        val ready = (application as HappyApplication).graphReady
+        if (ready.isCompleted && ready.getCompletionExceptionOrNull() == null) ready.getCompleted().oauthCallback(uri)
+        return true
+    }
+}
+
+/** A screen that never reports fully drawn (a chat restored after process death) ends the start this late. */
+private const val START_GRACE_MS = 3_000L
+
+/** ProfileInstallerInitializer's own wait before it writes the profile (5 s from the first frame). */
+private const val PROFILE_DELAY_MS = 5_000L

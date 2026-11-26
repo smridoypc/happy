@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  values/strings_settings.xml in zh-Hant: Android-only strings, not in happy-app's
+  catalogs. AndroidStringsTranslatedTest fails while one is missing here.
+-->
+<resources>
+    <string name="settings_search_placeholder">搜尋設定</string>
+    <string name="settings_nothing_found">找不到任何內容</string>
+    <string name="settings_add_agent">新增代理程式</string>
+    <string name="settings_edit_agent">編輯代理程式</string>
+    <string name="settings_change_avatar">更換頭像</string>
+    <string name="settings_edit_name">編輯名稱</string>
+    <string name="settings_hide_projects">隱藏專案</string>
+    <string name="settings_hide_projects_footer">首頁不顯示你的專案，此處和 Happy Desktop 中皆是如此。</string>
+    <string name="settings_backup_restore">備份與還原</string>
+    <string name="settings_show_secret_key">顯示金鑰</string>
+    <string name="settings_hide_secret_key">隱藏金鑰</string>
+    <string name="settings_copy_secret_key">複製金鑰</string>
+    <string name="settings_link_device_footer">掃描另一支手機在「還原」中顯示的代碼，讓它登入此帳戶。</string>
+    <string name="settings_copy_id_footer">點一下 ID 即可複製。</string>
+    <string name="settings_change_photo">更換照片</string>
+    <string name="settings_remove_photo">移除照片</string>
+    <string name="settings_could_not_save_profile">無法儲存你的個人資料</string>
+    <string name="settings_could_not_change_photo">無法更換你的照片</string>
+    <string name="settings_could_not_remove_photo">無法移除你的照片</string>
+    <string name="settings_agents_title">代理</string>
+    <string name="settings_agents_default">預設（%1$s）</string>
+    <string name="settings_agents_use_code_default">使用程式碼預設值</string>
+    <string name="settings_agents_custom_model">自訂模型…</string>
+    <string name="settings_agents_enter_model_id">輸入確切的模型 ID</string>
+    <string name="settings_agents_no_machines">沒有已連線的裝置</string>
+    <string name="settings_agents_no_machines_subtitle">在電腦上執行 Happy 以連線它</string>
+    <string name="settings_agents_defaults">預設值</string>
+    <string name="settings_agents_clear_overrides">清除覆寫設定</string>
+    <string name="settings_agents_clear_overrides_subtitle">將所有代理恢復為程式碼預設值</string>
+    <string name="settings_agents_permission">權限</string>
+    <string name="settings_agents_model">模型</string>
+    <string name="settings_agents_effort">推理強度</string>
+    <string name="settings_agents_custom_codex_title">自訂 Codex 模型</string>
+    <string name="settings_agents_custom_codex_message">輸入確切的模型 ID。是否可用取決於你的 Codex 帳號或 API 設定。</string>
+    <string name="settings_commit">提交</string>
+    <string name="settings_commit_at">提交 %1$s</string>
+    <string name="settings_manage_subscriptions">管理訂閱</string>
+    <string name="agent_settings_new_sessions_start">新工作階段開始於</string>
+    <string name="agent_settings_new_sessions_last">上次的工作階段</string>
+    <string name="agent_settings_new_sessions_default">預設模型</string>
+    <string name="agent_settings_new_sessions_last_description">你上次開始的工作階段的模型和推理強度。</string>
+    <string name="agent_settings_new_sessions_default_description">下方選擇的模型和推理強度。</string>
+    <string name="agent_settings_default_model_last_description">跟隨你上次開始的工作階段，使用你上次選擇的帳號。</string>
+    <string name="agent_settings_default_model_default_description">使用你上次在聊天中選擇的帳號。</string>
+    <string name="agent_settings_default_effort">預設推理強度</string>
+    <string name="agent_settings_default_access">預設存取模式</string>
+    <string name="agent_settings_default_access_description">新工作階段無需詢問即可執行的操作。儲存在你的帳號中，因此在你的所有裝置上都生效。</string>
+    <string name="agent_settings_new_sessions_unreadable">無法讀取模型。請檢查連線後重新開啟此頁面。</string>
+    <string name="settings_analytics_not_saved">分析暫時已關閉，但無法儲存此設定。下次啟動 Happy 時將重新開啟。</string>
+    <string name="settings_analytics_not_turned_on">無法開啟分析。請稍後再試。</string>
+</resources>

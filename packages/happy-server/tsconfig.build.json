@@ -1,0 +1,5 @@
+{
+  // Production build typecheck; test sources are not shipped.
+  "extends": "./tsconfig.json",
+  "exclude": ["sources/**/*.spec.ts", "sources/**/*.test.ts"]
+}

@@ -1,0 +1,297 @@
+package com.slopus.happy.ui.start
+
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.ripple
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.dp
+import com.slopus.happy.R
+import com.slopus.happy.ui.components.HappyDropdownMenu
+import com.slopus.happy.ui.components.HappyMenuDivider
+import com.slopus.happy.ui.components.HappyMenuItem
+import com.slopus.happy.ui.components.Icon
+import com.slopus.happy.ui.components.Ionicon
+import com.slopus.happy.ui.components.RoundButton
+import com.slopus.happy.ui.components.RoundButtonDisplay
+import com.slopus.happy.ui.onboarding.GetHelpAlert
+import com.slopus.happy.ui.theme.HappyTheme
+
+object StartTags {
+    const val BACKGROUND = "start.background"
+    const val CONTENT = "start.content"
+    const val LOGO = "start.logo"
+    const val CONNECT = "start.connect"
+    const val CLOUD = "start.cloud"
+    const val HELP = "start.help"
+    /** The self-hosted flow's ⋮ drop-down ([StartMenu]) and its rows, on the next screen. */
+    const val MENU = "start.menu"
+    const val ENTER_LINK = "start.enterLink"
+    const val RESTORE = "start.restore"
+    const val SERVER = "start.server"
+    const val GET_HELP = "start.getHelp"
+}
+
+/**
+ * The first screen. Steve's palette: deep blue and violet over near-black
+ * in dark mode, their pale tints over lavender white in light mode. No
+ * green or orange. Every colour behind the text keeps it at WCAG AA or
+ * better (white on the dark colours 5.7:1 at least, #14112E on the light
+ * ones 6.1:1 at least).
+ */
+object StartSpec {
+    val darkPalette = GrainPalette(
+        back = Color(0xFF06050F),
+        colors = listOf(Color(0xFF4338CA), Color(0xFF7C3AED), Color(0xFF1D4ED8), Color(0xFF2A00FF)),
+    )
+    val lightPalette = GrainPalette(
+        back = Color(0xFFF4F2FF),
+        colors = listOf(Color(0xFF818CF8), Color(0xFFC4B5FD), Color(0xFF93C5FD), Color(0xFFA78BFA)),
+    )
+    val darkText = Color(0xFFFFFFFF)
+    val lightText = Color(0xFF14112E)
+    /** A slide's line: the text at 87%, still AA (4.6:1 at least) on every colour of the gradient. */
+    const val SECONDARY_ALPHA = 0.87f
+    /** The dots of the slides not showing. */
+    val darkDot = Color(0x4DFFFFFF)
+    val lightDot = Color(0x4014112E)
+
+    /** logotype_*.png is 1200 × 319; small, on the top row. */
+    val logoWidth = 88.dp
+    const val LOGO_ASPECT = 1200f / 319f
+    /** The onboarding pills' least width, iOS's. */
+    val connectMinWidth = 280.dp
+    val bottomPadding = 48.dp
+    /** Between Start and Use Happy Cloud under it (iOS StartLayout.buttonGap). */
+    val cloudGap = 12.dp
+    /** Kept under Use Happy Cloud, above the bottom inset; Start rises to make room. */
+    val cloudBottomPadding = 24.dp
+    val controlsPadding = 4.dp
+    val control = 48.dp
+    val controlIcon = 24.dp
+    val menuMinWidth = 220.dp
+    val menuIcon = 22.dp
+}
+
+/**
+ * The first screen, shown only while there is no Happy account and no
+ * agent connection (once added, the account menu's Add takes over). No header (Steve's exception, AGENTS.md): the Grain
+ * Gradient fills the window behind the system bars; everything else keeps
+ * out of the bars and the cutout. It ignores the keyboard. No ⋮ (Steve):
+ * the other ways in are the self-hosted flow's, in the ⋮ of the next
+ * screen ([InstallDesktopScreen]) and the scanner.
+ *
+ *   ? (top right)  Get help ([GetHelpAlert]), a 48 target 4 in
+ *   logo           88 wide, centred on the ?'s row
+ *   slides         [StartGallery], centred between that row and Start
+ *   Start          centred across, as wide as its label (at least 280),
+ *                  48 above the bottom inset: the next screen
+ *                  ([InstallDesktopScreen]), which scans
+ *   Use Happy Cloud where the build offers it ([onCloud]): the quiet
+ *                  text action 12 under Start, as wide as it, 24 kept
+ *                  under it; Start rises to make room (iOS StartLayout)
+ *
+ * If it all outgrows the window (large text, a phone on its side) it
+ * scrolls, 16 kept above and below the slides.
+ */
+@Composable
+fun StartScreen(
+    connecting: Boolean,
+    onStart: () -> Unit,
+    onCloud: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    val dark = HappyTheme.colors.dark
+    val tint = if (dark) StartSpec.darkText else StartSpec.lightText
+    Box(modifier = modifier.fillMaxSize()) {
+        GrainGradient(
+            palette = if (dark) StartSpec.darkPalette else StartSpec.lightPalette,
+            modifier = Modifier.fillMaxSize().testTag(StartTags.BACKGROUND),
+        )
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                // Bars and cutout, never the keyboard: nothing here takes text, so a dialog's keyboard leaves it still.
+                .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))
+                .testTag(StartTags.CONTENT),
+        ) {
+            val viewport = maxHeight
+            val art = StartGallerySpec.artFor(maxWidth, maxHeight)
+            val compact = maxHeight < StartGallerySpec.compactHeight
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .heightIn(min = viewport),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(
+                    Modifier.fillMaxWidth().padding(top = StartSpec.controlsPadding).height(StartSpec.control),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Image(
+                        painter = painterResource(if (dark) R.drawable.logotype_light else R.drawable.logotype_dark),
+                        contentDescription = stringResource(R.string.start_logo),
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.width(StartSpec.logoWidth).aspectRatio(StartSpec.LOGO_ASPECT).testTag(StartTags.LOGO),
+                    )
+                }
+                Spacer(Modifier.height(StartGallerySpec.margin))
+                Spacer(Modifier.weight(1f))
+                StartGallery(
+                    textColor = tint,
+                    secondaryColor = tint.copy(alpha = StartSpec.SECONDARY_ALPHA),
+                    dotColor = if (dark) StartSpec.darkDot else StartSpec.lightDot,
+                    art = art,
+                    compact = compact,
+                )
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(StartGallerySpec.margin))
+                StartButtons(onStart = onStart, connecting = connecting, cloud = onCloud, tint = tint)
+            }
+            Row(modifier = Modifier.fillMaxWidth().padding(StartSpec.controlsPadding)) {
+                Spacer(Modifier.weight(1f))
+                var help by remember { mutableStateOf(false) }
+                StartControl(Ionicon.HelpCircleOutline, stringResource(R.string.onboarding_get_help), tint, { help = true }, Modifier.testTag(StartTags.HELP))
+                if (help) GetHelpAlert(onDismiss = { help = false })
+            }
+        }
+    }
+}
+
+/** A 48 round touch target with a 24 glyph in the palette's text colour, straight on the gradient. */
+@Composable
+internal fun StartControl(icon: Ionicon, description: String, tint: Color, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(StartSpec.control)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(bounded = false, radius = StartSpec.control / 2, color = tint),
+                role = Role.Button,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon = icon, size = StartSpec.controlIcon, color = tint, contentDescription = description)
+    }
+}
+
+/**
+ * Start, and Use Happy Cloud under it where the build offers it, both as
+ * wide as the wider (at least 280), so neither reads as the lesser. Under
+ * Start is its 48 above the bottom; Happy Cloud, 12 under Start with 24
+ * kept under it, takes more, and Start rises by the difference.
+ */
+@Composable
+private fun StartButtons(onStart: () -> Unit, connecting: Boolean, cloud: (() -> Unit)?, tint: Color) {
+    Column(Modifier.widthIn(min = StartSpec.connectMinWidth).width(IntrinsicSize.Max)) {
+        RoundButton(
+            title = stringResource(R.string.start_button),
+            onClick = onStart,
+            loading = connecting,
+            modifier = Modifier.testTag(StartTags.CONNECT),
+        )
+        Box(Modifier.fillMaxWidth().heightIn(min = StartSpec.bottomPadding), contentAlignment = Alignment.TopCenter) {
+            if (cloud != null) {
+                RoundButton(
+                    title = stringResource(R.string.start_cloud),
+                    onClick = cloud,
+                    enabled = !connecting,
+                    display = RoundButtonDisplay.Inverted,
+                    contentColor = tint,
+                    modifier = Modifier
+                        .padding(top = StartSpec.cloudGap, bottom = StartSpec.cloudBottomPadding)
+                        .testTag(StartTags.CLOUD),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The self-hosted flow's ⋮ drop-down, the next screen's
+ * ([InstallDesktopScreen]): the ways in besides scanning, then Get help
+ * ([GetHelpAlert]), as the scanner's ⋮. Happy Cloud isn't here: its way in
+ * is the first screen's own button.
+ */
+@Composable
+internal fun StartMenu(
+    open: Boolean,
+    enabled: Boolean,
+    customServerLabel: String?,
+    onDismiss: () -> Unit,
+    onEnterLink: () -> Unit,
+    onRestore: () -> Unit,
+    onServer: () -> Unit,
+) {
+    var help by remember { mutableStateOf(false) }
+    HappyDropdownMenu(
+        expanded = open,
+        onDismissRequest = onDismiss,
+        modifier = Modifier.widthIn(min = StartSpec.menuMinWidth).testTag(StartTags.MENU),
+    ) {
+        @Composable
+        fun item(label: String, icon: Ionicon, tag: String, detail: String? = null, itemEnabled: Boolean = enabled, onClick: () -> Unit) {
+            HappyMenuItem(
+                label = label,
+                supporting = detail,
+                leading = { Icon(icon, StartSpec.menuIcon, LocalContentColor.current) },
+                enabled = itemEnabled,
+                onClick = {
+                    onDismiss()
+                    onClick()
+                },
+                modifier = Modifier.testTag(tag),
+            )
+        }
+        item(stringResource(R.string.start_enter_link), Ionicon.LinkOutline, StartTags.ENTER_LINK, onClick = onEnterLink)
+        HappyMenuDivider()
+        item(stringResource(R.string.account_kind_restore_cli_account), Ionicon.KeyOutline, StartTags.RESTORE, onClick = onRestore)
+        item(
+            stringResource(R.string.account_kind_cli_server),
+            Ionicon.ServerOutline,
+            StartTags.SERVER,
+            detail = customServerLabel,
+            onClick = onServer,
+        )
+        HappyMenuDivider()
+        item(stringResource(R.string.onboarding_get_help), Ionicon.HelpCircleOutline, StartTags.GET_HELP, itemEnabled = true) { help = true }
+    }
+    if (help) GetHelpAlert(onDismiss = { help = false })
+}

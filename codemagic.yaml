@@ -1,0 +1,108 @@
+workflows:
+  happy-ios-simulator:
+    name: Happy iOS - Simulator Build (No Apple Developer Account Required)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+
+    environment:
+      xcode: latest
+      vars:
+        HAPPY_RELEASE_WITHOUT_CALL_AGENT: "1"
+
+    scripts:
+      - name: Install XcodeGen
+        script: |
+          which xcodegen || brew install xcodegen
+
+      - name: Generate Xcode Project
+        script: |
+          cd packages/happy-ios
+          xcodegen generate
+
+      - name: Resolve SPM Dependencies
+        script: |
+          cd packages/happy-ios
+          xcodebuild -resolvePackageDependencies -project Happy.xcodeproj -scheme Happy
+
+      - name: Build for iOS Simulator
+        script: |
+          cd packages/happy-ios
+          xcodebuild build \
+            -project Happy.xcodeproj \
+            -scheme Happy \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build
+
+    artifacts:
+      - packages/happy-ios/build/Build/Products/Debug-iphonesimulator/*.app
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      email:
+        recipients:
+          - your-email@example.com
+        notify:
+          on_success: true
+          on_failure: true
+
+  happy-ios-release:
+    name: Happy iOS - Release IPA (For TestFlight / Physical Devices)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+
+    environment:
+      xcode: latest
+      vars:
+        HAPPY_RELEASE_WITHOUT_CALL_AGENT: "1"
+        # Optional custom keys:
+        # HAPPY_CALL_AGENT_V3_ID: "agent_xxx"
+        # EXPO_PUBLIC_REVENUE_CAT_APPLE: "appl_xxx"
+
+      # To enable automatic signing with App Store Connect API:
+      # app_store_connect:
+      #   auth: integration
+
+    scripts:
+      - name: Install XcodeGen
+        script: |
+          which xcodegen || brew install xcodegen
+
+      - name: Generate Xcode Project
+        script: |
+          cd packages/happy-ios
+          xcodegen generate
+
+      - name: Resolve SPM Dependencies
+        script: |
+          cd packages/happy-ios
+          xcodebuild -resolvePackageDependencies -project Happy.xcodeproj -scheme Happy
+
+      # Uncomment if using App Store Connect automatic signing in Codemagic UI:
+      # - name: Set up code signing
+      #   script: |
+      #     xcode-project use-profiles
+
+      - name: Build & Package App
+        script: |
+          cd packages/happy-ios
+          xcodebuild archive \
+            -project Happy.xcodeproj \
+            -scheme Happy \
+            -configuration Release \
+            -archivePath build/Happy.xcarchive \
+            CODE_SIGNING_ALLOWED=NO
+
+    artifacts:
+      - packages/happy-ios/build/Happy.xcarchive
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      email:
+        recipients:
+          - your-email@example.com
+        notify:
+          on_success: true
+          on_failure: true
+

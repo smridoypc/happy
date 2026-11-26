@@ -1,0 +1,208 @@
+import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
+@testable import HappyLayout
+import XCTest
+
+/// V2 settings on a 390-wide phone: the bar, the profile strip,
+/// the cards and the QR sheet, frame by frame.
+final class SettingsLayoutTests: XCTestCase {
+    /// A row home's search found comes to the middle of the page, as far
+    /// as the page scrolls.
+    func testARowSearchFoundScrollsToTheMiddle() {
+        let row = SettingsLayout.RowSpec(hasIcon: true, valueWidth: nil, accessory: .chevron)
+        let layout = SettingsLayout(width: 402, nameHeight: 34, subtitleHeight: 21, cards: Array(repeating: Array(repeating: row, count: 4), count: 6))
+        let insets = LayoutInsets(top: 114, left: 0, bottom: 34, right: 0)
+        // The fourth card's second row: cards from 209 (8, the strip's 104,
+        // 12, the name's 34, 2, the line's 21, 28), 232 apart, its middle 78
+        // into its card: 983 down. 726 shows between the insets.
+        let card = layout.cards[3]
+        XCTAssertEqual(card.frame.minY + card.rows[1].box.midY, 983)
+        XCTAssertEqual(layout.revealOffset(card: 3, row: 1, viewport: 874, insets: insets), 983 - 114 - 726 / 2)
+        // The first row can't come down to the middle: the page stays at its top.
+        XCTAssertEqual(layout.revealOffset(card: 0, row: 0, viewport: 874, insets: insets), -114)
+        // The last can't come up past the page's end.
+        XCTAssertEqual(layout.revealOffset(card: 5, row: 3, viewport: 874, insets: insets), layout.contentHeight + 34 - 874)
+        XCTAssertNil(layout.revealOffset(card: 6, row: 0, viewport: 874, insets: insets))
+        XCTAssertNil(layout.revealOffset(card: 0, row: 4, viewport: 874, insets: insets))
+    }
+
+    /// Both kinds of page have the profile's picture over its name, so
+    /// switching between them changes nothing above the cards' rows:
+    /// the picture centred under the bar, the name and line under it.
+    /// Searching, the picture goes with the name.
+    func testThePictureHeadsEitherKindOfPage() {
+        typealias L = SettingsLayout
+        let row = [L.RowSpec(hasIcon: true, accessory: .chevron)]
+        let layout = L(width: 390, nameHeight: 34, subtitleHeight: 22, cards: [row, row], showsStrip: false, picture: 100)
+        XCTAssertEqual(layout.strip, .zero)
+        XCTAssertEqual(layout.picture, CGRect(x: 145, y: 8, width: 100, height: 100))
+        XCTAssertEqual(layout.name, CGRect(x: 24, y: 120, width: 342, height: 34))
+        XCTAssertEqual(layout.subtitle, CGRect(x: 24, y: 156, width: 342, height: 22))
+        XCTAssertEqual(layout.cards.map(\.frame), [CGRect(x: 16, y: 206, width: 358, height: 52), CGRect(x: 16, y: 282, width: 358, height: 52)])
+        XCTAssertEqual(layout.contentHeight, 366)
+        // An odd width keeps the picture on whole points.
+        XCTAssertEqual(L(width: 393, nameHeight: 34, subtitleHeight: 22, cards: [row], showsStrip: false, picture: 100).picture, CGRect(x: 147, y: 8, width: 100, height: 100))
+        let searching = L(width: 390, nameHeight: 34, subtitleHeight: 22, cards: [row], searching: true, showsStrip: false, picture: 100)
+        XCTAssertEqual(searching.picture, .zero)
+        XCTAssertEqual(searching.cards[0].frame, CGRect(x: 16, y: 8, width: 358, height: 52))
+    }
+
+    /// Support's row under Profile: the boba a tile's 30 square where a
+    /// plain row's tile sits, its title where a plain row's title sits, both
+    /// held at the top; the line under the title wraps before the chevron
+    /// and the row grows down for it, as far below the words as the title
+    /// is from the top. Words never move the art or change its size.
+    func testAnArtRowKeepsATilesArtAtTheTopAndGrowsForItsWords() {
+        typealias L = SettingsLayout
+        XCTAssertEqual(L.artTextWidth(390), 264)
+        // One line of title (21) and two of the line under it (41).
+        let two = L(width: 390, nameHeight: 34, subtitleHeight: 22, cards: [[L.RowSpec(hasIcon: false, accessory: .chevron, art: L.ArtText(title: 21, subtitle: 41))]], showsStrip: false)
+        let row = two.cards[0].rows[0]
+        XCTAssertEqual(row.box, CGRect(x: 0, y: 0, width: 358, height: 95))
+        XCTAssertEqual(row.art, CGRect(x: 16, y: 11, width: 30, height: 30))
+        XCTAssertEqual(row.title, CGRect(x: 62, y: 15, width: 264, height: 22))
+        XCTAssertEqual(row.subtitle, CGRect(x: 62, y: 39, width: 264, height: 41))
+        XCTAssertEqual(row.chevron, CGRect(x: 334, y: 41, width: 8, height: 14))
+        XCTAssertNil(row.icon)
+        XCTAssertNil(row.separator)
+        // The art and title stand exactly where a plain row's tile and title do.
+        let plain = L(width: 390, nameHeight: 34, subtitleHeight: 22, cards: [[L.RowSpec(hasIcon: true, accessory: .chevron)]], showsStrip: false).cards[0].rows[0]
+        XCTAssertEqual(row.art, plain.icon)
+        XCTAssertEqual(row.title.origin, plain.title.origin)
+        // A title alone is a plain row's height.
+        let alone = L(width: 390, nameHeight: 34, subtitleHeight: 22, cards: [[L.RowSpec(hasIcon: false, accessory: .chevron, art: L.ArtText(title: 21, subtitle: 0))]], showsStrip: false).cards[0].rows[0]
+        XCTAssertEqual(alone.box.height, L.Metrics.row)
+        XCTAssertNil(alone.subtitle)
+        // At a large text size: the row grows to 212; the art stays put.
+        let tall = L(width: 390, nameHeight: 34, subtitleHeight: 22, cards: [[L.RowSpec(hasIcon: false, accessory: .chevron, art: L.ArtText(title: 60, subtitle: 120))]], showsStrip: false).cards[0].rows[0]
+        XCTAssertEqual(tall.box.height, 212)
+        XCTAssertEqual(tall.art, CGRect(x: 16, y: 11, width: 30, height: 30))
+        XCTAssertEqual(tall.title.minY, 15)
+        XCTAssertEqual(tall.subtitle?.maxY, 197)
+        // On a 320 phone the words get 194.
+        XCTAssertEqual(L.artTextWidth(320), 194)
+    }
+
+    /// Switching profiles keeps the page where it was, unless the new
+    /// page ends before there.
+    func testSwitchingKeepsThePlaceUnlessThePageEndsSooner() {
+        typealias L = SettingsLayout
+        let row = [L.RowSpec(hasIcon: true, accessory: .chevron)]
+        // Six one-row cards under the picture: 206 + 6 × 52 + 5 × 24, then 32.
+        let layout = L(width: 390, nameHeight: 34, subtitleHeight: 22, cards: Array(repeating: row, count: 6), showsStrip: false, picture: 100)
+        XCTAssertEqual(layout.contentHeight, 670)
+        let insets = LayoutInsets(top: 114, left: 0, bottom: 34, right: 0)
+        // 670 + 34 - 500: the farthest a 500 viewport scrolls.
+        XCTAssertEqual(layout.keptOffset(120, viewport: 500, insets: insets), 120)
+        XCTAssertEqual(layout.keptOffset(300, viewport: 500, insets: insets), 204)
+        XCTAssertEqual(layout.keptOffset(-114, viewport: 500, insets: insets), -114)
+        XCTAssertEqual(layout.keptOffset(-200, viewport: 500, insets: insets), -114)
+        // A page shorter than the screen rests at its top.
+        XCTAssertEqual(layout.keptOffset(120, viewport: 874, insets: insets), -114)
+    }
+
+    func testSearchingTheCardsMoveUpUnderTheField() {
+        typealias L = SettingsLayout
+        let layout = L(width: 390, nameHeight: 34, subtitleHeight: 22, cards: [[L.RowSpec(hasIcon: true, accessory: .chevron)]], searching: true)
+        XCTAssertEqual(layout.cards[0].frame, CGRect(x: 16, y: 8, width: 358, height: 52))
+        XCTAssertEqual(layout.empty, CGRect(x: 0, y: 40, width: 390, height: 24))
+        XCTAssertEqual(layout.contentHeight, 92)
+        let nothing = L(width: 390, nameHeight: 34, subtitleHeight: 22, cards: [], searching: true)
+        XCTAssertEqual(nothing.contentHeight, 40)
+    }
+
+    func testTheChosenProfileIsCentredLargerAndTheOthersShrinkWithDistance() {
+        typealias C = ProfileCarousel
+        XCTAssertEqual(C.Metrics.height, 104)
+        XCTAssertEqual(C.contentWidth(count: 3, width: 390), 558)
+        XCTAssertEqual(C.item(0, offset: 0, width: 390), C.Item(frame: CGRect(x: 149, y: 6, width: 92, height: 92), emphasis: 1))
+        XCTAssertEqual(C.item(1, offset: 0, width: 390), C.Item(frame: CGRect(x: 249, y: 22, width: 60, height: 60), emphasis: 0))
+        // Halfway between two, both are halfway sizes.
+        XCTAssertEqual(C.item(0, offset: 42, width: 390), C.Item(frame: CGRect(x: 157, y: 14, width: 76, height: 76), emphasis: 0.5))
+        XCTAssertEqual(C.item(1, offset: 42, width: 390), C.Item(frame: CGRect(x: 241, y: 14, width: 76, height: 76), emphasis: 0.5))
+        // A flick rests on an item, never past the ends.
+        XCTAssertEqual(C.snapped(100, count: 3), 84)
+        XCTAssertEqual(C.snapped(500, count: 3), 168)
+        XCTAssertEqual(C.index(at: -50, count: 3), 0)
+    }
+
+    func testTheCardsAreInsetWithTilesValuesChevronsAndAToggle() {
+        typealias L = SettingsLayout
+        let layout = L(width: 390, nameHeight: 34, subtitleHeight: 22, cards: [
+            [L.RowSpec(hasIcon: true, accessory: .toggle)],
+            [L.RowSpec(hasIcon: true, accessory: .chevron), L.RowSpec(hasIcon: true, valueWidth: 40, accessory: .chevron)],
+            [L.RowSpec(hasIcon: false, accessory: .none)],
+        ])
+        XCTAssertEqual(layout.strip, CGRect(x: 0, y: 8, width: 390, height: 104))
+        XCTAssertEqual(layout.name, CGRect(x: 24, y: 124, width: 342, height: 34))
+        XCTAssertEqual(layout.subtitle, CGRect(x: 24, y: 160, width: 342, height: 22))
+
+        let prioritizing = layout.cards[0]
+        XCTAssertEqual(prioritizing.frame, CGRect(x: 16, y: 210, width: 358, height: 52))
+        XCTAssertEqual(prioritizing.rows[0].icon, CGRect(x: 16, y: 11, width: 30, height: 30))
+        XCTAssertEqual(prioritizing.rows[0].title, CGRect(x: 62, y: 15, width: 209, height: 22))
+        XCTAssertEqual(prioritizing.rows[0].toggle, CGRect(x: 279, y: 12, width: 63, height: 28))
+        XCTAssertNil(prioritizing.rows[0].separator)
+
+        let more = layout.cards[1]
+        XCTAssertEqual(more.frame, CGRect(x: 16, y: 286, width: 358, height: 104))
+        XCTAssertEqual(more.rows[0].chevron, CGRect(x: 334, y: 19, width: 8, height: 14))
+        XCTAssertEqual(more.rows[0].title, CGRect(x: 62, y: 15, width: 264, height: 22))
+        XCTAssertEqual(more.rows[0].separator, CGRect(x: 62, y: 52 - 1.0 / 3, width: 296, height: 1.0 / 3))
+        XCTAssertEqual(more.rows[1].chevron, CGRect(x: 334, y: 71, width: 8, height: 14))
+        XCTAssertEqual(more.rows[1].value, CGRect(x: 286, y: 67, width: 40, height: 22))
+        XCTAssertEqual(more.rows[1].title, CGRect(x: 62, y: 67, width: 216, height: 22))
+        XCTAssertNil(more.rows[1].separator)
+
+        let disconnect = layout.cards[2]
+        XCTAssertEqual(disconnect.frame, CGRect(x: 16, y: 414, width: 358, height: 52))
+        XCTAssertNil(disconnect.rows[0].icon)
+        XCTAssertEqual(disconnect.rows[0].title, CGRect(x: 16, y: 15, width: 326, height: 22))
+        XCTAssertEqual(layout.contentHeight, 498)
+    }
+
+    func testTheQRSheetSitsAtTheFootWithThePictureCentredAboveIt() {
+        let sheet = QRSheetLayout(size: CGSize(width: 390, height: 844), safeTop: 47, safeBottom: 34, nameHeight: 28, text: .fixed(width: 300, height: 44))
+        XCTAssertEqual(sheet.sheet, CGRect(x: 0, y: 570, width: 390, height: 274))
+        XCTAssertEqual(sheet.close, CGRect(x: 330, y: 16, width: 44, height: 44))
+        XCTAssertEqual(sheet.title, CGRect(x: 74, y: 25, width: 242, height: 22))
+        XCTAssertEqual(sheet.text, CGRect(x: 30, y: 58, width: 330, height: 44))
+        XCTAssertEqual(sheet.primary, CGRect(x: 30, y: 126, width: 330, height: 52))
+        XCTAssertEqual(sheet.secondary, CGRect(x: 30, y: 188, width: 330, height: 52))
+        XCTAssertEqual(sheet.avatar, CGRect(x: 145, y: 237, width: 100, height: 100))
+        XCTAssertEqual(sheet.name, CGRect(x: 30, y: 353, width: 330, height: 28))
+    }
+
+    func testTheLinkSheetTitlesItThenNumbersItsSteps() {
+        let line = Measurable { _ in CGSize(width: 200, height: 22) }
+        let body = Measurable { _ in CGSize(width: 300, height: 42) }
+        let layout = LinkContentLayout(width: 345, title: Measurable { _ in CGSize(width: 200, height: 34) }, steps: [
+            .init(title: line, body: body), .init(title: line, body: body), .init(title: line, body: body),
+        ])
+        XCTAssertEqual(layout.title, CGRect(x: 0, y: 0, width: 345, height: 34))
+        // The relay checklist's rows: the number in a 26 circle beside the
+        // step's line, centred on its 32 head, the line under it at 38.
+        XCTAssertEqual(layout.steps.map(\.box), [
+            CGRect(x: 0, y: 61, width: 26, height: 26),
+            CGRect(x: 0, y: 161, width: 26, height: 26),
+            CGRect(x: 0, y: 261, width: 26, height: 26),
+        ])
+        XCTAssertEqual(layout.steps[0].title, CGRect(x: 38, y: 63, width: 307, height: 22))
+        XCTAssertEqual(layout.steps[0].body, CGRect(x: 38, y: 96, width: 307, height: 42))
+        XCTAssertEqual(layout.steps[2].body?.maxY, 338)
+        XCTAssertEqual(layout.size, CGSize(width: 345, height: 350))
+    }
+
+    func testTheSwitchIsThreeFifthsOfTheButtonsCentred() {
+        let layout = LinkSwitchLayout(accessory: CGRect(x: 24, y: 400, width: 354, height: 36), tag: CGSize(width: 40.2, height: 17.5))
+        XCTAssertEqual(layout.control, CGRect(x: 95, y: 400, width: 212, height: 36))
+        XCTAssertEqual(layout.tag, CGRect(x: 256, y: 391, width: 41, height: 18))
+    }
+
+    func testTheBetaTagSitsAstrideTheSwitchAtItsEnd() {
+        let layout = LinkSwitchLayout(control: CGRect(x: 24, y: 400, width: 354, height: 36), tag: CGSize(width: 40.2, height: 17.5))
+        XCTAssertEqual(layout.tag, CGRect(x: 327, y: 391, width: 41, height: 18))
+    }
+}

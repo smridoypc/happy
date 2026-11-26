@@ -1,0 +1,611 @@
+package com.slopus.happy.ui.connection
+
+import com.slopus.happy.agent.ComputeRole
+import com.slopus.happy.agent.Permission
+import com.slopus.happy.agent.AutoJoinKind
+import com.slopus.happy.connection.HappyCloud
+import com.slopus.happy.ui.tablet.BackOrSidebarToggle
+import com.slopus.happy.ui.settings.SettingsTags
+import com.slopus.happy.call.CallAllowance
+import com.slopus.happy.ui.components.ProvideRowReveal
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.Dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavGraphBuilder
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.composable
+import androidx.navigation.toRoute
+import com.slopus.happy.AppGraph
+import com.slopus.happy.R
+import com.slopus.happy.agent.AgentLinkStatus
+import com.slopus.happy.agent.AgentProfileState
+import com.slopus.happy.agent.CompletionSound
+import com.slopus.happy.payments.Offer
+import com.slopus.happy.ui.components.Avatar
+import com.slopus.happy.ui.components.Ionicon
+import com.slopus.happy.ui.components.ItemList
+import com.slopus.happy.ui.components.Screen
+import com.slopus.happy.ui.connect.LocalAddFlow
+import com.slopus.happy.ui.conversation.openChiefOfStaff
+import com.slopus.happy.ui.home.AccountMenu
+import com.slopus.happy.ui.home.rememberAccountMenu
+import com.slopus.happy.ui.settings.AboutActions
+import com.slopus.happy.ui.settings.AboutInfo
+import com.slopus.happy.ui.settings.AccountsCard
+import com.slopus.happy.ui.settings.AccountsCardActions
+import com.slopus.happy.ui.settings.RemoveCard
+import com.slopus.happy.ui.settings.SettingsEditItem
+import com.slopus.happy.ui.settings.SettingsHeader
+import com.slopus.happy.ui.settings.SettingsPageSpec
+import com.slopus.happy.ui.settings.SettingsPageTags
+import com.slopus.happy.ui.settings.SettingsProfile
+import com.slopus.happy.ui.settings.SettingsCard
+import com.slopus.happy.ui.settings.SettingsEntry
+import com.slopus.happy.ui.settings.SettingsSearchBar
+import com.slopus.happy.ui.settings.SettingsSearchButton
+import com.slopus.happy.ui.settings.SettingsSearchResults
+import com.slopus.happy.ui.settings.SettingsSection
+import com.slopus.happy.ui.settings.SettingsTile
+import com.slopus.happy.ui.settings.aboutSection
+import com.slopus.happy.ui.settings.addAgentEntry
+import com.slopus.happy.ui.settings.rememberSettingsSearch
+import com.slopus.happy.ui.settings.settingsProfileEntries
+import com.slopus.happy.ui.settings.settingsSearchResults
+import com.slopus.happy.ui.settings.kindSubtitle
+import com.slopus.happy.ui.settings.SettingsTiles
+import com.slopus.happy.ui.settings.rememberAboutActions
+import com.slopus.happy.ui.settings.rememberAboutInfo
+import com.slopus.happy.ui.settings.rememberLast
+import com.slopus.happy.ui.LocalAccountSwitcher
+import com.slopus.happy.ui.AccountSwitcher
+import com.slopus.happy.ui.SettingsRoute
+import com.slopus.happy.ui.SettingsDissolveBox
+import androidx.compose.foundation.ScrollState
+import com.slopus.happy.ui.theme.HappyTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+
+/** The agent connection screens beside home and Settings ([SettingsRoute]). HappyApp's NavHost calls this once. */
+fun NavGraphBuilder.agentHomeRoutes(graph: AppGraph, nav: NavHostController) {
+    agentSettingsPages(graph, nav)
+}
+
+/** Where a row of an agent connection's settings is: its page, Appearance's or Notifications', or the picture's menu (an ask, which runs). */
+enum class AgentSettingsPlace { Settings, Appearance, Notifications, Ask }
+
+/**
+ * One row of an agent connection's settings as home's search finds it
+ * (iOS's `SettingsIndex.Entry`): the id the page tags and reveals it by,
+ * its title there, its glyph, and where it is. [ask] is an ask's words.
+ */
+@Immutable
+data class AgentSettingsRow(val id: String, val title: String, val icon: Ionicon, val place: AgentSettingsPlace, val ask: String? = null)
+
+/**
+ * iOS's `SettingsIndex.computer`: what an agent connection's settings show,
+ * in their order, the picture's two asks and Appearance's Hide projects
+ * included. Disconnect is left out: a search doesn't offer to take the
+ * connection away. The titles are the page's own (`AgentSettingsIndexTest`).
+ */
+@Composable
+fun agentSettingsIndex(projectsAvailable: Boolean = true, notificationsAvailable: Boolean = false, providerAccountsAvailable: Boolean = false): List<AgentSettingsRow> {
+    fun row(id: String, title: String, icon: Ionicon, place: AgentSettingsPlace = AgentSettingsPlace.Settings, ask: String? = null) =
+        AgentSettingsRow(id, title, icon, place, ask)
+    return listOfNotNull(
+        row(AgentSettingsTags.APPEARANCE, stringResource(R.string.settings_appearance), Ionicon.ColorPaletteOutline),
+        row(AgentPagesTags.HIDE_PROJECTS_ROW, stringResource(R.string.settings_hide_projects), Ionicon.FolderOutline, AgentSettingsPlace.Appearance).takeIf { projectsAvailable },
+        row(AgentPagesTags.GROUP_TOOL_CALLS_ROW, stringResource(R.string.agent_settings_group_tool_calls), Ionicon.LayersOutline, AgentSettingsPlace.Appearance),
+        row(AgentSettingsTags.PROFILE, stringResource(R.string.settings_account_profile), Ionicon.PersonCircleOutline),
+        row(AgentSettingsTags.ASK_NAME, stringResource(R.string.agent_settings_edit_name), Ionicon.CreateOutline, AgentSettingsPlace.Ask, stringResource(R.string.agent_settings_edit_name_prefix)),
+        row(AgentSettingsTags.ASK_AVATAR, stringResource(R.string.agent_settings_edit_avatar), Ionicon.ImageOutline, AgentSettingsPlace.Ask, stringResource(R.string.agent_settings_edit_avatar_prefix)),
+        row(AgentVoiceTags.ROW, stringResource(R.string.agent_voice_title), Ionicon.MicOutline),
+        row(DataStorageTags.ROW, stringResource(R.string.data_storage_title), Ionicon.ServerOutline),
+        // Sharing is notifications: one row, and the page's own switches by their titles.
+        row(AgentSharingTags.ROW, stringResource(R.string.cloud_push_title), Ionicon.NotificationsOutline),
+        row(CloudPushTags.SERVER, stringResource(R.string.cloud_push_server), Ionicon.NotificationsOutline, AgentSettingsPlace.Notifications).takeIf { notificationsAvailable },
+        row(AgentSharingTags.row(AutoJoinKind.Tasks), stringResource(R.string.sharing_tasks), Ionicon.PeopleOutline, AgentSettingsPlace.Notifications),
+        row(AgentSharingTags.row(AutoJoinKind.Surfaces), stringResource(R.string.sharing_surfaces), Ionicon.PeopleOutline, AgentSettingsPlace.Notifications),
+        row(AgentVoiceTags.SUPPORT, stringResource(R.string.agent_voice_support_title), Ionicon.Heart),
+        row(AgentAgentsTags.ROW, stringResource(R.string.settings_agents), Ionicon.OptionsOutline),
+        row(ProviderAccountsTags.ROW, stringResource(R.string.provider_accounts_title), Ionicon.KeyOutline).takeIf { providerAccountsAvailable },
+        row(AgentUsageTags.ROW, stringResource(R.string.usage_title), Ionicon.AnalyticsOutline),
+        row(PrivacyTags.ROW, stringResource(R.string.settings_account_privacy), Ionicon.LockClosedOutline),
+        row(SettingsPageTags.ADD_AGENT, stringResource(R.string.settings_add_agent), Ionicon.Add),
+        row(SettingsTags.WHATS_NEW, stringResource(R.string.settings_whats_new), Ionicon.SparklesOutline),
+        row(SettingsTags.GITHUB, stringResource(R.string.settings_github), Ionicon.LogoGithub),
+        row(SettingsTags.REPORT_ISSUE, stringResource(R.string.settings_report_issue), Ionicon.BugOutline),
+        row(SettingsTags.PRIVACY, stringResource(R.string.settings_privacy_policy), Ionicon.ShieldCheckmarkOutline),
+        row(SettingsTags.TERMS, stringResource(R.string.settings_terms_of_service), Ionicon.DocumentTextOutline),
+        row(SettingsTags.VERSION, stringResource(R.string.common_version), Ionicon.InformationCircleOutline),
+    )
+}
+
+/**
+ * Opens [row] as iOS's `SettingsViewController.open(reveal:)` does: the
+ * connection's settings, scrolled to the row with it flashing; a row of
+ * Appearance's or Notifications' on that page, over settings; an ask runs, the Chief of
+ * Staff's chat opening with its words typed in.
+ */
+fun NavHostController.openAgentSettingsRow(connectionId: String, row: AgentSettingsRow) {
+    when (row.place) {
+        AgentSettingsPlace.Settings -> navigate(SettingsRoute(reveal = row.id))
+        AgentSettingsPlace.Appearance -> {
+            navigate(SettingsRoute())
+            navigate(AgentAppearanceRoute(connectionId, reveal = row.id))
+        }
+        AgentSettingsPlace.Notifications -> {
+            navigate(SettingsRoute())
+            navigate(AgentSharingRoute(connectionId, reveal = row.id))
+        }
+        AgentSettingsPlace.Ask -> openChiefOfStaff(connectionId, row.ask.orEmpty())
+    }
+}
+
+object AgentSettingsTags {
+    const val DAEMON_VERSION = "agentSettings.daemonVersion"
+    const val BAR = "agentSettings.bar"
+    const val PROFILE = "agentSettings.profile"
+    const val APPEARANCE = "agentSettings.appearance"
+    /** The picture's two asks, as search finds them. */
+    const val ASK_NAME = "agentSettings.ask.name"
+    const val ASK_AVATAR = "agentSettings.ask.avatar"
+}
+
+/** Everything an agent connection's settings ask of the app. */
+@Immutable
+class AgentSettingsActions(
+    val onBack: () -> Unit = {},
+    /** The person's own name and picture on this agent. */
+    val onProfile: () -> Unit = {},
+    val onAppearance: () -> Unit = {},
+    /** Voice: what it is and the free time left. */
+    val onVoice: () -> Unit = {},
+    /** Data and Storage: the media kept on this phone; null where nothing is kept. */
+    val onDataStorage: (() -> Unit)? = null,
+    /** Notifications (it was Sharing): joining other people's tasks and docs, and a Cloud server's push settings. */
+    val onSharing: (() -> Unit)? = null,
+    /** Agents: what a new chat starts on (desktop's New sessions); null where it isn't offered. */
+    val onAgents: (() -> Unit)? = null,
+    /** Members: who is on this Happy Cloud server, and leaving it; null for any other connection. */
+    val onMembers: (() -> Unit)? = null,
+    /** Inference on a Happy Agent: where each Codex, Claude and Grok account's login comes from, and signing it in again; null where the agent doesn't offer it. */
+    val onProviderAccounts: (() -> Unit)? = null,
+    /** AI providers: the Happy Cloud server's connections, and adding ChatGPT, Claude and API keys; null for any other connection. */
+    val onProviders: (() -> Unit)? = null,
+    /** A Happy Cloud server's instructions and security policy, where its settings serve them ([PolicyDocument.served]). */
+    val onPolicy: ((com.slopus.happy.agent.PolicyDocument) -> Unit)? = null,
+    /** Happy Cloud's machines and join requests; absent without compute.use. */
+    val onCompute: (() -> Unit)? = null,
+    /** Usage: what the provider accounts spent and what is left of their plans; null where it isn't offered. */
+    val onUsage: (() -> Unit)? = null,
+    /** A Happy Cloud server: its push settings, on the same Notifications page. Every Cloud member can manage their own, read-only members included. */
+    val onNotifications: (() -> Unit)? = null,
+    /** Opens Notifications with one of its rows revealed, as search finds it; null where search shouldn't offer them. */
+    val onNotificationsRow: ((reveal: String) -> Unit)? = null,
+    /** Privacy: this phone's Analytics switch. */
+    val onPrivacy: () -> Unit = {},
+    /** Disconnects this connection; asked for only after the person confirmed. */
+    val onRemove: () -> Unit = {},
+    /** Opens this connection's Chief of Staff with [prefix] typed, unsent; null where the person's role can't write to it. */
+    val onAskChief: ((prefix: String) -> Unit)? = {},
+)
+
+/** The Profile row: the person's own name and picture on the agent. */
+@Immutable
+data class AgentPerson(val name: String = "", val photo: ImageBitmap? = null, val seed: String? = null)
+
+/**
+ * An agent connection's settings, as iOS's SettingsViewController lays out
+ * a connection's page: the agent's own picture, large and centred, with a
+ * pencil badge whose menu asks its Chief of Staff to change its picture or
+ * name (nothing is sent until the person sends it), its name and link
+ * status under it; every account on the phone with Add Agent; then
+ * desktop's sidebar groups: the first (Appearance, the theme and the
+ * desktop's Hide projects; the person's own Profile; Voice;
+ * Data and Storage; Notifications, which is Sharing and on a Cloud server
+ * its push settings too), Support Happy's boba row under it, Agents
+ * (Agents, Inference: a Happy Agent's accounts or Cloud's providers, Compute, Usage), Team (Members,
+ * on Cloud); Privacy;
+ * the agent's version; About; Disconnect, after a
+ * confirm. A device token can't reach
+ * the agent's device list (API.md, "Credentials on the connector's
+ * socket"), so disconnecting forgets the agent on this phone only.
+ *
+ * Search, as on a Happy account's page ([SettingsSearchResults]), finds the
+ * accounts by name, the picture's two asks (which run), this page's rows
+ * and [appearance]'s, which change in place.
+ */
+@Composable
+fun AgentConnectionSettingsScreen(
+    profile: SettingsProfile,
+    accounts: AccountMenu,
+    actions: AgentSettingsActions,
+    about: AboutInfo,
+    accountActions: AccountsCardActions = AccountsCardActions({}, {}),
+    aboutActions: AboutActions = AboutActions(),
+    person: AgentPerson = AgentPerson(),
+    /** Appearance's rows, for search: found, they change here, as on their page. */
+    appearance: List<SettingsEntry> = emptyList(),
+    /** Where the page is scrolled; shared with the other kind's page, so a switch keeps it (AccountSettings). */
+    scroll: ScrollState = rememberScrollState(),
+    daemonVersion: String? = null,
+    /** This phone's free voice time, for the Voice row ([rememberAgentVoiceSummary]). */
+    voice: AgentVoiceSummary = AgentVoiceSummary(CallAllowance.FREE_MILLIS),
+) {
+    val namePrefix = stringResource(R.string.agent_settings_edit_name_prefix)
+    val avatarPrefix = stringResource(R.string.agent_settings_edit_avatar_prefix)
+    val changeAvatar = stringResource(R.string.settings_change_avatar)
+    val editName = stringResource(R.string.settings_edit_name)
+    val edit = actions.onAskChief?.let { ask ->
+        listOf(
+            SettingsEditItem(changeAvatar, Ionicon.ImageOutline, SettingsPageTags.EDIT_AVATAR) { ask(avatarPrefix) },
+            SettingsEditItem(editName, Ionicon.Pencil, SettingsPageTags.EDIT_NAME) { ask(namePrefix) },
+        )
+    }
+    val search = rememberSettingsSearch()
+    // Desktop's sidebar, group for group (AppHappyAgentSettingsView): its
+    // unheaded first group (General, here Appearance; Account, here Profile;
+    // Voice; the phone's Data and Storage; and Notifications, Steve's
+    // "Sharing is notifications"), then Agents (what new sessions start on, Inference,
+    // Compute, Usage) and Team (Members; with none, no header). The phone's own cards keep their places: the accounts at the top,
+    // Support Happy under the first group, Privacy and About at the end.
+    val sections = listOf(
+        SettingsSection(
+            listOfNotNull(
+                SettingsEntry(
+                    id = AgentSettingsTags.APPEARANCE,
+                    title = stringResource(R.string.settings_appearance),
+                    icon = { SettingsTile(Ionicon.ColorPaletteOutline, SettingsTiles.purple) },
+                    onClick = actions.onAppearance,
+                ),
+                SettingsEntry(
+                    id = AgentSettingsTags.PROFILE,
+                    title = stringResource(R.string.settings_account_profile),
+                    icon = { PersonPicture(person.photo, person.seed ?: profile.id, SettingsPageSpec.tile) },
+                    detail = person.name.takeIf { it.isNotEmpty() },
+                    onClick = actions.onProfile,
+                ),
+                agentVoiceEntry(voice, actions.onVoice),
+                actions.onDataStorage?.let { open ->
+                    SettingsEntry(
+                        id = DataStorageTags.ROW,
+                        title = stringResource(R.string.data_storage_title),
+                        icon = { SettingsTile(Ionicon.ServerOutline, SettingsTiles.green) },
+                        onClick = open,
+                    )
+                },
+                // Sharing is notifications: one row, on every connection; a Cloud server's push settings are on its page too.
+                (actions.onSharing ?: actions.onNotifications)?.let { open ->
+                    SettingsEntry(
+                        id = AgentSharingTags.ROW,
+                        title = stringResource(R.string.cloud_push_title),
+                        icon = { SettingsTile(Ionicon.NotificationsOutline, SettingsTiles.red) },
+                        onClick = open,
+                    )
+                },
+            ),
+        ),
+        SettingsSection(
+            listOfNotNull(
+                actions.onAgents?.let { open ->
+                    SettingsEntry(
+                        id = AgentAgentsTags.ROW,
+                        title = stringResource(R.string.settings_agents),
+                        icon = { SettingsTile(Ionicon.OptionsOutline, SettingsTiles.teal) },
+                        onClick = open,
+                    )
+                },
+                actions.onProviderAccounts?.let { open ->
+                    SettingsEntry(
+                        id = ProviderAccountsTags.ROW,
+                        title = stringResource(R.string.provider_accounts_title),
+                        icon = { SettingsTile(Ionicon.KeyOutline, SettingsTiles.indigo) },
+                        onClick = open,
+                    )
+                },
+                actions.onProviders?.let { open ->
+                    SettingsEntry(
+                        id = CloudProvidersTags.ROW,
+                        title = stringResource(R.string.cloud_providers_title),
+                        icon = { SettingsTile(Ionicon.SparklesOutline, SettingsTiles.indigo) },
+                        onClick = open,
+                    )
+                },
+                // Instructions and Security policy follow Inference, as iOS lists them.
+                *com.slopus.happy.agent.PolicyDocument.entries.mapNotNull { document ->
+                    actions.onPolicy?.let { open ->
+                        SettingsEntry(
+                            id = PolicyDocumentTags.row(document),
+                            title = stringResource(if (document == com.slopus.happy.agent.PolicyDocument.Instructions) R.string.policy_instructions else R.string.policy_security),
+                            icon = { SettingsTile(if (document == com.slopus.happy.agent.PolicyDocument.Instructions) Ionicon.DocumentTextOutline else Ionicon.ShieldCheckmarkOutline, if (document == com.slopus.happy.agent.PolicyDocument.Instructions) SettingsTiles.blue else SettingsTiles.green) },
+                            onClick = { open(document) },
+                        )
+                    }
+                }.toTypedArray(),
+                // Compute follows Inference, as desktop's Agents group has it.
+                actions.onCompute?.let { open ->
+                    SettingsEntry(
+                        id = ComputeTags.ROW,
+                        title = stringResource(R.string.compute_title),
+                        icon = { SettingsTile(Ionicon.ServerOutline, SettingsTiles.blue) },
+                        onClick = open,
+                    )
+                },
+                // Usage closes the group, after Compute.
+                actions.onUsage?.let { open ->
+                    SettingsEntry(
+                        id = AgentUsageTags.ROW,
+                        title = stringResource(R.string.usage_title),
+                        icon = { SettingsTile(Ionicon.AnalyticsOutline, SettingsTiles.teal) },
+                        onClick = open,
+                    )
+                },
+            ),
+            title = stringResource(R.string.settings_group_agents),
+        ),
+        SettingsSection(
+            listOfNotNull(
+                actions.onMembers?.let { open ->
+                    SettingsEntry(
+                        id = CloudTags.MEMBERS,
+                        title = stringResource(R.string.cloud_members),
+                        icon = { SettingsTile(Ionicon.PeopleOutline, SettingsTiles.orange) },
+                        onClick = open,
+                    )
+                },
+            ),
+            title = stringResource(R.string.settings_group_team),
+        ),
+        privacySection(actions.onPrivacy),
+        SettingsSection(
+            listOfNotNull(
+                daemonVersion?.takeIf(String::isNotBlank)?.let { version ->
+                    SettingsEntry(
+                        id = AgentSettingsTags.DAEMON_VERSION,
+                        title = "${stringResource(R.string.account_kind_agent)} · ${stringResource(R.string.common_version)}",
+                        detail = version,
+                        icon = { SettingsTile(Ionicon.InformationCircleOutline, SettingsTiles.gray) },
+                        chevron = false,
+                    )
+                },
+            ),
+        ),
+        // Support Happy's boba row is this page's Support us, and its page manages subscriptions.
+        aboutSection(about, aboutActions),
+    ).filter { it.rows.isNotEmpty() }
+    // The bar on the page's own grey (black in dark), the groups on it: one surface, as the chat's details.
+    Screen(
+        header = {
+            if (search.searching) {
+                SettingsSearchBar(search, AgentSettingsTags.BAR)
+            } else {
+                AgentTopBar(
+                    tag = AgentSettingsTags.BAR,
+                    container = HappyTheme.colors.grouped.background,
+                    navigationIcon = { BackOrSidebarToggle { BarIconButton(Ionicon.ArrowBack, stringResource(R.string.common_back), actions.onBack) } },
+                    title = { Text(stringResource(R.string.settings_title), style = MaterialTheme.typography.titleLarge, maxLines = 1) },
+                    actions = { SettingsSearchButton(search) },
+                )
+            }
+        },
+        avoidKeyboard = search.searching,
+    ) {
+        if (search.searching) {
+            // The picture's two asks, found here, run: the Chief of Staff's chat opens with the words typed in.
+            val ask = actions.onAskChief
+            val asks = if (ask == null) emptyList() else listOf(
+                SettingsEntry(AgentSettingsTags.ASK_NAME, stringResource(R.string.agent_settings_edit_name), icon = { SettingsTile(Ionicon.CreateOutline, SettingsTiles.blue) }, chevron = false, onClick = { ask(namePrefix) }, closesSearch = true),
+                SettingsEntry(AgentSettingsTags.ASK_AVATAR, stringResource(R.string.agent_settings_edit_avatar), icon = { SettingsTile(Ionicon.ImageOutline, SettingsTiles.orange) }, chevron = false, onClick = { ask(avatarPrefix) }, closesSearch = true),
+            )
+            val profiles = settingsProfileEntries(accounts, accountActions.onSwitch)
+            // Notifications' switches by their own titles: found, the page opens on the row.
+            val notifications = actions.onNotificationsRow?.let { open ->
+                fun entry(id: String, title: String, icon: Ionicon) =
+                    SettingsEntry(id, title, icon = { SettingsTile(icon, SettingsTiles.red) }, onClick = { open(id) }, closesSearch = true)
+                listOfNotNull(
+                    entry(CloudPushTags.SERVER, stringResource(R.string.cloud_push_server), Ionicon.NotificationsOutline).takeIf { actions.onNotifications != null },
+                    entry(AgentSharingTags.row(AutoJoinKind.Tasks), stringResource(R.string.sharing_tasks), Ionicon.PeopleOutline),
+                    entry(AgentSharingTags.row(AutoJoinKind.Surfaces), stringResource(R.string.sharing_surfaces), Ionicon.PeopleOutline),
+                )
+            }.orEmpty()
+            val rows = listOf(addAgentEntry(accountActions), supportBobaEntry(aboutActions.onSupport)) + sections.flatMap { it.rows } + appearance + notifications
+            SettingsSearchResults(search, settingsSearchResults(search.query, profiles, asks, rows))
+        } else {
+            SettingsDissolveBox {
+                ItemList(scrollState = scroll) {
+                    SettingsHeader(profile, edit)
+                    AccountsCard(accounts, accountActions)
+                    // Support Happy right under the first group.
+                    for ((index, section) in sections.withIndex()) {
+                        SettingsCard(section)
+                        if (index == 0) SupportBobaCard(aboutActions.onSupport, subscribed = voice.offer == Offer.Subscribed)
+                    }
+                    RemoveCard(agent = true, name = profile.name, onRemove = actions.onRemove)
+                }
+            }
+        }
+    }
+}
+
+/** The person's picture round at [size], else the one [seed] picks (as their Profile page shows it). */
+@Composable
+internal fun PersonPicture(photo: ImageBitmap?, seed: String, size: Dp) {
+    if (photo != null) {
+        Image(photo, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(size).clip(CircleShape))
+    } else {
+        Avatar(seed, size)
+    }
+}
+
+/** [bytes] decoded once per array; null for none or bytes that aren't an image. */
+@Composable
+internal fun rememberPhoto(bytes: ByteArray?): ImageBitmap? = remember(bytes) {
+    bytes?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }.getOrNull() }
+}
+
+@Composable
+internal fun statusText(status: AgentLinkStatus): String = stringResource(
+    when (status) {
+        AgentLinkStatus.Connected -> R.string.agent_settings_connected
+        AgentLinkStatus.Connecting -> R.string.agent_settings_connecting
+        AgentLinkStatus.Revoked -> R.string.agent_settings_revoked
+        AgentLinkStatus.UpdateRequired -> R.string.agent_settings_update
+        AgentLinkStatus.SignInRequired -> R.string.team_server_settings_signed_out
+    },
+)
+
+/**
+ * Forgets the agent connection [id] on this phone; a Happy Cloud server's
+ * session is revoked at the accounts service first (`POST /revoke`), without
+ * waiting on it. When it was open, the next account opens: a Happy account
+ * that can be read first, else another agent ([AppGraph.usableAccount]);
+ * none, the first Happy account's unlock state, else the first screen.
+ */
+internal suspend fun removeAgentConnection(graph: AppGraph, id: String) = graph.whileSwitching {
+    val open = graph.openAgentId.value == id
+    val next = graph.usableAccount(excluding = id)
+    if (HappyCloud.isServer(graph.agentConnections.accounts.value.firstOrNull { it.id == id }?.server)) {
+        graph.cloudPush.beforeRemoval(id)
+        graph.agentConnections.credentials(id)?.oauth?.let { graph.cloudAccount?.revoke(it) }
+    }
+    graph.agentConnections.remove(id)
+    if (!open) return@whileSwitching
+    if (next != null) {
+        graph.open(next).join()
+    } else {
+        // None usable: the first Happy account, if any, so one that can't be read shows its unlock state.
+        withContext(Dispatchers.IO) { graph.accountStore.select(graph.accountStore.registry.value.ordered.firstOrNull()?.id) }
+        graph.auth.reload()
+    }
+}
+
+/**
+ * The accounts card's actions, the same on both kinds of page: a tap opens
+ * another account without leaving Settings ([AccountSwitcher.fromSettings]),
+ * Add scans, holding an agent connection disconnects it and holding a Happy
+ * account signs that account out, even when another is open. Taking away the
+ * open one keeps Settings, over the next account's home.
+ */
+@Composable
+internal fun rememberAccountsCardActions(graph: AppGraph): AccountsCardActions {
+    val scope = rememberCoroutineScope()
+    val add = LocalAddFlow.current
+    val switcher = LocalAccountSwitcher.current
+    return remember(graph, add, switcher) {
+        AccountsCardActions(
+            onSwitch = { id -> if (switcher != null) switcher.fromSettings(id) else graph.open(id) },
+            onAdd = { add?.scan() },
+            onRemove = { entry ->
+                val remove: suspend () -> Unit = if (entry.agent) {
+                    { removeAgentConnection(graph, entry.id) }
+                } else {
+                    { graph.logout(entry.id).join() }
+                }
+                val open = graph.openAccount.value.id == entry.id
+                if (switcher != null && open) switcher.removingFromSettings(remove) else scope.launch { remove() }
+            },
+            canRemove = { true },
+        )
+    }
+}
+
+/** Agent connection [connectionId]'s Settings, scrolled by [scroll] (AccountSettings). */
+@Composable
+internal fun AgentConnectionSettings(graph: AppGraph, nav: NavHostController, connectionId: String, scroll: ScrollState) {
+    val agents by graph.agentConnections.accounts.collectAsStateWithLifecycle()
+    // Disconnecting from here, the page stays as it was until the next account's takes its place.
+    val agent = rememberLast(agents.firstOrNull { it.id == connectionId })?.takeIf { it.id == connectionId } ?: return
+    val session = remember(connectionId) { graph.agentSessions.session(connectionId) }
+    val status = session?.status?.collectAsStateWithLifecycle()?.value ?: AgentLinkStatus.Connecting
+    val personState = session?.profile?.state?.collectAsStateWithLifecycle()?.value ?: AgentProfileState()
+    val personPhoto = rememberPhoto(session?.profile?.photo?.collectAsStateWithLifecycle()?.value)
+    val theme by graph.localSettings.themePreference.collectAsStateWithLifecycle()
+    val sound = session?.completionSound?.collectAsStateWithLifecycle()?.value ?: CompletionSound.Always
+    val projectsHidden = session?.projectsHidden?.collectAsStateWithLifecycle()?.value ?: false
+    val toolCallsGrouped by graph.toolCallsGrouped.enabled.collectAsStateWithLifecycle()
+    // Read every time the page shows, as iOS's Profile row is.
+    LaunchedEffect(session) { session?.profile?.refresh() }
+    val scope = rememberCoroutineScope()
+    val accounts = rememberAccountMenu(graph).shownAs(connectionId)
+    val switcher = LocalAccountSwitcher.current
+    val cloud = graph.cloudAccount != null && HappyCloud.isServer(agent.server)
+    // The Chief of Staff is an admin bot: asking it needs a role that manages bots.
+    val permissions = session?.permissions?.collectAsStateWithLifecycle()?.value
+    val askChief = permissions?.allows(Permission.BOTS_MANAGE) ?: true
+    val compute = ComputeRole.of(cloud, permissions ?: com.slopus.happy.agent.ServerPermissions.Unknown) != ComputeRole.None
+    val policy = cloud && permissions?.let(com.slopus.happy.agent.PolicyDocument::served) == true
+    // Happy Cloud keeps its own AI providers; a Happy Agent says it signs accounts in.
+    val providerAccounts = !cloud && session?.providerSignInAvailable?.collectAsStateWithLifecycle()?.value == true
+    val actions = remember(graph, nav, connectionId, switcher, cloud, askChief, compute, policy, providerAccounts) {
+        AgentSettingsActions(
+            onBack = { nav.popBackStack() },
+            onProfile = { nav.navigate(AgentProfileRoute(connectionId)) },
+            onAppearance = { nav.navigate(AgentAppearanceRoute(connectionId)) },
+            onVoice = { nav.navigate(AgentVoiceRoute(connectionId)) },
+            onDataStorage = { nav.navigate(AgentDataStorageRoute(connectionId)) },
+            onSharing = { nav.navigate(AgentSharingRoute(connectionId)) },
+            onAgents = { nav.navigate(AgentAgentsRoute(connectionId)) },
+            onMembers = if (cloud) ({ nav.navigate(CloudMembersRoute(connectionId)) }) else null,
+            onProviderAccounts = if (providerAccounts) ({ nav.navigate(ProviderAccountsRoute(connectionId)) }) else null,
+            onProviders = if (cloud) ({ nav.openCloudProviders(connectionId) }) else null,
+            onPolicy = if (policy) ({ document -> nav.navigate(PolicyDocumentRoute(connectionId, document.id)) }) else null,
+            onCompute = if (compute) ({ nav.navigate(CloudComputeRoute(connectionId)) }) else null,
+            onUsage = { nav.navigate(AgentUsageRoute(connectionId)) },
+            onNotifications = if (cloud) ({ nav.navigate(CloudPushSettingsRoute(connectionId)) }) else null,
+            onNotificationsRow = { reveal -> nav.navigate(AgentSharingRoute(connectionId, reveal = reveal)) },
+            onPrivacy = { nav.navigate(PrivacyRoute) },
+            onAskChief = if (askChief) ({ prefix -> nav.openChiefOfStaff(connectionId, prefix) }) else null,
+            onRemove = {
+                if (switcher != null) switcher.removingFromSettings { removeAgentConnection(graph, connectionId) }
+                else scope.launch { removeAgentConnection(graph, connectionId) }
+            },
+        )
+    }
+    AgentConnectionSettingsScreen(
+        profile = SettingsProfile(
+            id = connectionId,
+            seed = accounts.entries.firstOrNull { it.id == connectionId }?.seed ?: connectionId,
+            name = agent.name.ifEmpty { stringResource(R.string.account_kind_agent) },
+            subtitle = kindSubtitle(stringResource(R.string.account_kind_agent), statusText(status)),
+            imageUri = agent.avatarFile?.let { "file://$it" },
+            thumbhash = agent.thumbhash,
+        ),
+        accounts = accounts,
+        actions = actions,
+        about = rememberAboutInfo(graph),
+        accountActions = rememberAccountsCardActions(graph),
+        aboutActions = rememberAboutActions(graph, nav),
+        person = AgentPerson(personState.name, personPhoto, rememberPersonSeed(graph, connectionId)),
+        appearance = agentAppearanceSections(
+            theme, graph.localSettings::setThemePreference, projectsHidden, { session?.setProjectsHidden(it) }, sound, { session?.setCompletionSound(it) },
+            projectsAvailable = !cloud, toolCallsGrouped = toolCallsGrouped, onToolCallsGrouped = graph.toolCallsGrouped::set,
+        ).flatMap { it.rows },
+        scroll = scroll,
+        voice = rememberAgentVoiceSummary(graph.offers, graph.subscription),
+        daemonVersion = agent.daemonVersion,
+    )
+}

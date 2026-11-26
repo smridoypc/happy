@@ -1,0 +1,9 @@
+{
+  "name": "happy-android-translations",
+  "private": true,
+  "type": "module",
+  "description": "Generates native Android resources from shared JSON translation catalogs.",
+  "scripts": {
+    "generate": "node generate.mjs"
+  }
+}

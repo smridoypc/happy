@@ -1,0 +1,299 @@
+/**
+ * AgyDisplay - Ink UI component for the agy (Antigravity) agent
+ *
+ * Terminal UI for the agy agent: displays streamed messages, status, and the
+ * current model. Mirrors GeminiDisplay; agy streams plain text so messages are
+ * appended as they arrive.
+ */
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Box, Text, useStdout, useInput } from 'ink';
+import { MessageBuffer, type BufferedMessage } from './messageBuffer';
+import { agyModelFamily } from '@/agy/constants';
+
+interface AgyDisplayProps {
+  messageBuffer: MessageBuffer;
+  logPath?: string;
+  currentModel?: string;
+  availableModels?: string[];
+  onSelectModel?: (model: string) => void;
+  onExit?: () => void;
+}
+
+export const AgyDisplay: React.FC<AgyDisplayProps> = ({
+  messageBuffer,
+  logPath,
+  currentModel,
+  availableModels = [],
+  onSelectModel,
+  onExit,
+}) => {
+  const [messages, setMessages] = useState<BufferedMessage[]>([]);
+  const [confirmationMode, setConfirmationMode] = useState<boolean>(false);
+  const [actionInProgress, setActionInProgress] = useState<boolean>(false);
+  const [model, setModel] = useState<string | undefined>(currentModel);
+  const [pickerOpen, setPickerOpen] = useState<boolean>(false);
+  const [cursorIndex, setCursorIndex] = useState<number>(0);
+  const confirmationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const { stdout } = useStdout();
+  const terminalWidth = stdout.columns || 80;
+  const terminalHeight = stdout.rows || 24;
+  // The picker lists model rows; `model` is the resolved "Gemini 4 Argon (High)".
+  const activeModel = model ? agyModelFamily(model) : undefined;
+
+  // Update model when prop changes (only if different to avoid loops)
+  useEffect(() => {
+    if (currentModel !== undefined && currentModel !== model) {
+      setModel(currentModel);
+    }
+  }, [currentModel]); // Only depend on currentModel, not model, to avoid loops
+
+  useEffect(() => {
+    setMessages(messageBuffer.getMessages());
+
+    const unsubscribe = messageBuffer.onUpdate((newMessages) => {
+      setMessages(newMessages);
+
+      // Extract model from [MODEL:...] messages when messages update
+      // Use reverse + find to get the LATEST model message (in case model was changed)
+      const modelMessage = [...newMessages].reverse().find(msg =>
+        msg.type === 'system' && msg.content.startsWith('[MODEL:')
+      );
+
+      if (modelMessage) {
+        const modelMatch = modelMessage.content.match(/\[MODEL:(.+?)\]/);
+        if (modelMatch && modelMatch[1]) {
+          const extractedModel = modelMatch[1];
+          setModel(prevModel => {
+            // Only update if different to avoid unnecessary re-renders
+            if (extractedModel !== prevModel) {
+              return extractedModel;
+            }
+            return prevModel;
+          });
+        }
+      }
+    });
+
+    return () => {
+      unsubscribe();
+      if (confirmationTimeoutRef.current) {
+        clearTimeout(confirmationTimeoutRef.current);
+      }
+    };
+  }, [messageBuffer]);
+
+  const resetConfirmation = useCallback(() => {
+    setConfirmationMode(false);
+    if (confirmationTimeoutRef.current) {
+      clearTimeout(confirmationTimeoutRef.current);
+      confirmationTimeoutRef.current = null;
+    }
+  }, []);
+
+  const setConfirmationWithTimeout = useCallback(() => {
+    setConfirmationMode(true);
+    if (confirmationTimeoutRef.current) {
+      clearTimeout(confirmationTimeoutRef.current);
+    }
+    confirmationTimeoutRef.current = setTimeout(() => {
+      resetConfirmation();
+    }, 15000); // 15 seconds timeout
+  }, [resetConfirmation]);
+
+  useInput(useCallback(async (input, key) => {
+    if (actionInProgress) return;
+
+    // Handle Ctrl-C
+    if (key.ctrl && input === 'c') {
+      if (pickerOpen) {
+        setPickerOpen(false);
+        return;
+      }
+      if (confirmationMode) {
+        // Second Ctrl-C, exit
+        resetConfirmation();
+        setActionInProgress(true);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        onExit?.();
+      } else {
+        // First Ctrl-C, show confirmation
+        setConfirmationWithTimeout();
+      }
+      return;
+    }
+
+    if (pickerOpen && availableModels.length > 0) {
+      if (key.escape || (!key.ctrl && !key.meta && input === 'm') || input === 'q') {
+        setPickerOpen(false);
+        return;
+      }
+      if (key.upArrow || input === 'k') {
+        setCursorIndex(prev => (prev - 1 + availableModels.length) % availableModels.length);
+        return;
+      }
+      if (key.downArrow || input === 'j') {
+        setCursorIndex(prev => (prev + 1) % availableModels.length);
+        return;
+      }
+      if (key.return) {
+        const chosen = availableModels[cursorIndex];
+        setPickerOpen(false);
+        if (chosen) {
+          setModel(chosen);
+          onSelectModel?.(chosen);
+        }
+        return;
+      }
+      return;
+    }
+
+    if (!key.ctrl && !key.meta && input === 'm' && availableModels.length > 0) {
+      if (confirmationMode) resetConfirmation();
+      const idx = activeModel ? availableModels.indexOf(activeModel) : -1;
+      setCursorIndex(idx >= 0 ? idx : 0);
+      setPickerOpen(true);
+      return;
+    }
+
+    // Any other key cancels confirmation
+    if (confirmationMode) {
+      resetConfirmation();
+    }
+  }, [confirmationMode, actionInProgress, pickerOpen, availableModels, cursorIndex, activeModel, onSelectModel, onExit, setConfirmationWithTimeout, resetConfirmation]));
+
+  const getMessageColor = (type: BufferedMessage['type']): string => {
+    switch (type) {
+      case 'user': return 'magenta';
+      case 'assistant': return 'blue';
+      case 'system': return 'blueBright';
+      case 'tool': return 'yellow';
+      case 'result': return 'green';
+      case 'status': return 'gray';
+      default: return 'white';
+    }
+  };
+
+  const formatMessage = (msg: BufferedMessage): string => {
+    const lines = msg.content.split('\n');
+    const maxLineLength = terminalWidth - 10;
+    return lines.map(line => {
+      if (line.length <= maxLineLength) return line;
+      const chunks: string[] = [];
+      for (let i = 0; i < line.length; i += maxLineLength) {
+        chunks.push(line.slice(i, i + maxLineLength));
+      }
+      return chunks.join('\n');
+    }).join('\n');
+  };
+
+  return (
+    <Box flexDirection="column" width={terminalWidth} height={terminalHeight}>
+      {/* Main content area with logs */}
+      <Box
+        flexDirection="column"
+        width={terminalWidth}
+        height={terminalHeight - 4}
+        borderStyle="round"
+        borderColor="gray"
+        paddingX={1}
+        overflow="hidden"
+      >
+        <Box flexDirection="column" marginBottom={1}>
+          <Text color="blueBright" bold>🪐 Agy Agent Messages</Text>
+          <Text color="gray" dimColor>{'─'.repeat(Math.min(terminalWidth - 4, 60))}</Text>
+        </Box>
+
+        <Box flexDirection="column" height={terminalHeight - 10} overflow="hidden">
+          {pickerOpen && availableModels.length > 0 ? (
+            <Box flexDirection="column">
+              <Text color="cyan" bold>Select Antigravity Model (↑/↓ to move, Enter to confirm, Esc to cancel):</Text>
+              {(() => {
+                const visibleRows = Math.max(5, terminalHeight - 12);
+                const half = Math.floor(visibleRows / 2);
+                const start = Math.max(0, Math.min(cursorIndex - half, availableModels.length - visibleRows));
+                const slice = availableModels.slice(start, start + visibleRows);
+                return slice.map((item, idx) => {
+                  const realIdx = start + idx;
+                  const isCursor = realIdx === cursorIndex;
+                  const isActive = item === activeModel;
+                  return (
+                    <Text key={item} color={isCursor ? 'greenBright' : isActive ? 'cyan' : 'white'} bold={isCursor || isActive}>
+                      {isCursor ? '❯ ' : '  '}{item}{isActive ? '  ✓' : ''}
+                    </Text>
+                  );
+                });
+              })()}
+            </Box>
+          ) : messages.length === 0 ? (
+            <Text color="gray" dimColor>Waiting for messages...</Text>
+          ) : (
+            messages
+              .filter(msg => {
+                // Filter out empty system messages (used for triggering re-renders)
+                if (msg.type === 'system' && !msg.content.trim()) {
+                  return false;
+                }
+                // Filter out model update messages (model extraction happens in useEffect)
+                if (msg.type === 'system' && msg.content.startsWith('[MODEL:')) {
+                  return false; // Don't show in UI
+                }
+                return true;
+              })
+              .slice(-Math.max(1, terminalHeight - 10))
+              .map((msg, index, array) => (
+                <Box key={msg.id} flexDirection="column" marginBottom={index < array.length - 1 ? 1 : 0}>
+                  <Text color={getMessageColor(msg.type)} dimColor>
+                    {formatMessage(msg)}
+                  </Text>
+                </Box>
+              ))
+          )}
+        </Box>
+      </Box>
+
+      {/* Status bar at the bottom */}
+      <Box
+        width={terminalWidth}
+        borderStyle="round"
+        borderColor={
+          actionInProgress ? 'gray' :
+          confirmationMode ? 'red' :
+          'blueBright'
+        }
+        paddingX={2}
+        justifyContent="center"
+        alignItems="center"
+        flexDirection="column"
+      >
+        <Box flexDirection="column" alignItems="center">
+          {actionInProgress ? (
+            <Text color="gray" bold>
+              Exiting agent...
+            </Text>
+          ) : confirmationMode ? (
+            <Text color="red" bold>
+              ⚠️  Press Ctrl-C again to exit the agent
+            </Text>
+          ) : (
+            <>
+              <Text color="blueBright" bold>
+                🪐 Agy Agent Running • Press m to switch model • Ctrl-C to exit
+              </Text>
+              {model && (
+                <Text color="gray" dimColor>
+                  Model: {model}
+                </Text>
+              )}
+            </>
+          )}
+          {process.env.DEBUG && logPath && (
+            <Text color="gray" dimColor>
+              Debug logs: {logPath}
+            </Text>
+          )}
+        </Box>
+      </Box>
+    </Box>
+  );
+};

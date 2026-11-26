@@ -1,0 +1,135 @@
+package com.slopus.happy.journeys
+
+import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isDialog
+import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.slopus.happy.ui.HappyApp
+import com.slopus.happy.ui.assertActionsLabelled
+import com.slopus.happy.ui.assertDp
+import com.slopus.happy.ui.bounds
+import com.slopus.happy.ui.chat.ChatScreenTags
+import com.slopus.happy.ui.chat.ComposerTags
+import com.slopus.happy.ui.chat.MessageTags
+import com.slopus.happy.ui.home.FlatRowTags
+import com.slopus.happy.ui.chat.ComposeChatTags
+import com.slopus.happy.ui.node
+import com.slopus.happy.ui.tablet.TabletShellTags
+import com.slopus.happy.ui.tablet.MainPanelTags
+import com.slopus.happy.ui.tablet.SidebarTags
+import androidx.navigation.NavHostController
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+
+/**
+ * Journey 6, the core path on a tablet: home in the sidebar beside the
+ * empty main panel's owl; a chat opens as the panel's root with its row
+ * selected and a reply goes out; New session at the sidebar's foot takes
+ * the panel's root, starts a session whose chat it becomes with its new row
+ * selected; the first chat's row brings it back. That chat archived from
+ * its row menu leaves the sidebar but stays in the panel, inactive; back
+ * then empties the panel.
+ */
+@OptIn(ExperimentalTestApi::class)
+@RunWith(AndroidJUnit4::class)
+@Config(qualifiers = "w1280dp-h800dp-xhdpi")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class TabletJourneyTest {
+    @get:Rule val rule = createComposeRule()
+
+    private val journey = Journey()
+    private val server = journey.server
+
+    @After
+    fun tearDown() = journey.close()
+
+    private fun row(title: String) = rule.onNode(hasTestTag(FlatRowTags.ROW) and hasAnyDescendant(hasText(title)), useUnmergedTree = true)
+
+    @Test
+    fun sidebarDetailChatAndANewSession() {
+        journey.machine()
+        journey.session("a", updatedAt = 200, title = "Tablet chat")
+        val graph = journey.graph()
+        journey.signIn(graph)
+        var nav: NavHostController? = null
+        rule.setContent { HappyApp(graph, onNavigationReady = { nav = it }) }
+
+        // The list in the sidebar, the owl beside it.
+        rule.waitFor(FlatRowTags.ROW)
+        rule.node(MainPanelTags.PLACEHOLDER).assertExists()
+        assertDp("the main panel beside the sidebar", 360, rule.node(TabletShellTags.DETAIL).bounds.left)
+        rule.assertActionsLabelled()
+
+        // A chat as the main panel's root, its row selected; a reply goes out.
+        row("Tablet chat").performClick()
+        rule.waitFor(ChatScreenTags.SCREEN)
+        assertDp("chat in the main panel", 360, rule.node(ChatScreenTags.SCREEN).bounds.left)
+        row("Tablet chat").assertIsSelected()
+        // The composer comes with the session, a beat after the screen.
+        rule.waitFor(ComposerTags.INPUT)
+        rule.node(ComposerTags.INPUT).performTextInput("from the tablet")
+        rule.node(ComposerTags.PRIMARY).performClick()
+        rule.waitUntil(10_000) { server.sentRecords("a").any { "from the tablet" in it.second.toString() } }
+        rule.waitFor(MessageTags.USER)
+        rule.assertActionsLabelled()
+
+        // New session at the sidebar's foot: the compose chat replaces the other, and becomes the started chat.
+        val spawns = journey.rpc(Journey.MACHINE, "spawn-happy-session") { request ->
+            server.addSession("b", updatedAt = 90_000, metadata = Journey.sessionMetadata(request["directory"]!!.jsonPrimitive.content, "Started on tablet"))
+            buildJsonObject { put("type", "success"); put("sessionId", "b") }
+        }
+        rule.node(SidebarTags.COMPOSE).performClick()
+        rule.waitFor(ComposeChatTags.TARGET)
+        rule.onAllNodes(hasTestTag(ChatScreenTags.SCREEN) and com.slopus.happy.ui.isOnActivePage, useUnmergedTree = true).assertCountEquals(1)
+        assertDp("the compose chat in the main panel", 360, rule.node(ChatScreenTags.SCREEN).bounds.left)
+        rule.node(ComposerTags.INPUT).performTextInput("Start here")
+        rule.node(ComposerTags.PRIMARY).performClick()
+        rule.waitUntil(15_000) { server.sentRecords("b").any { "Start here" in it.second.toString() } }
+        assertEquals("claude", spawns.single()["agent"]!!.jsonPrimitive.content)
+        rule.waitForChatTitle("Started on tablet", 15_000)
+        rule.waitUntil(10_000) { runCatching { row("Started on tablet").assertIsSelected() }.isSuccess }
+        assertDp("new chat in the main panel", 360, rule.node(ChatScreenTags.SCREEN).bounds.left)
+
+        // The first chat's row brings it back as the root, selected again.
+        row("Tablet chat").performClick()
+        rule.waitForChatTitle("Tablet chat")
+        rule.waitUntil(5_000) { runCatching { row("Tablet chat").assertIsSelected() }.isSuccess }
+        row("Tablet chat").assertIsSelected()
+        // The open chat archived from its sidebar row's menu: the row leaves the sidebar, and
+        // the main panel stays on the chat, now inactive (happy-app's row menu moves nothing).
+        row("Tablet chat").performTouchInput { longClick() }
+        rule.onNode(hasText("Archive") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        rule.waitUntil(10_000) { server.requestsTo("/v1/sessions/a/archive").isNotEmpty() }
+        rule.waitUntil(10_000) { rule.onAllNodes(hasTestTag(FlatRowTags.ROW) and hasAnyDescendant(hasText("Tablet chat")), useUnmergedTree = true).fetchSemanticsNodes().isEmpty() }
+        // The server says the session ended, as it does once the archive lands.
+        server.emitEphemeral(buildJsonObject {
+            put("type", "activity"); put("id", "a"); put("active", false); put("activeAt", System.currentTimeMillis()); put("thinking", false)
+        })
+        rule.waitForText("This session is inactive.")
+        rule.waitForChatTitle("Tablet chat")
+        row("Started on tablet").assertExists()
+        // The root's back is the sidebar's toggle; the system's back empties the panel.
+        rule.node(MainPanelTags.TOGGLE).assertExists()
+        rule.runOnIdle { nav!!.popBackStack() }
+        rule.waitFor(MainPanelTags.PLACEHOLDER)
+    }
+}

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  values/strings_tablet.xml in es: Android-only strings, not in happy-app's
+  catalogs. AndroidStringsTranslatedTest fails while one is missing here.
+-->
+<resources>
+    <string name="tablet_install_description">Instala y ejecuta Happy en tu ordenador para conectarlo.</string>
+</resources>

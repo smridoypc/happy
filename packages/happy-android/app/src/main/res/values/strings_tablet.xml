@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Tablet strings with no happy-app catalog key (English literals in its
+  source). Translated in values-*/ (AndroidStringsTranslatedTest).
+-->
+<resources>
+    <string name="tablet_install_description">Install and run Happy on your computer to connect it.</string>
+</resources>

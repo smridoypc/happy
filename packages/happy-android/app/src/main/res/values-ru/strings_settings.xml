@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  values/strings_settings.xml in ru: Android-only strings, not in happy-app's
+  catalogs. AndroidStringsTranslatedTest fails while one is missing here.
+-->
+<resources>
+    <string name="settings_search_placeholder">Поиск в настройках</string>
+    <string name="settings_nothing_found">Ничего не найдено</string>
+    <string name="settings_add_agent">Добавить агента</string>
+    <string name="settings_edit_agent">Изменить агента</string>
+    <string name="settings_change_avatar">Сменить аватар</string>
+    <string name="settings_edit_name">Изменить имя</string>
+    <string name="settings_hide_projects">Скрыть проекты</string>
+    <string name="settings_hide_projects_footer">Главный экран не показывает ваши проекты — здесь и в Happy Desktop.</string>
+    <string name="settings_backup_restore">Резервная копия и восстановление</string>
+    <string name="settings_show_secret_key">Показать секретный ключ</string>
+    <string name="settings_hide_secret_key">Скрыть секретный ключ</string>
+    <string name="settings_copy_secret_key">Скопировать секретный ключ</string>
+    <string name="settings_link_device_footer">Отсканируйте код, который другой телефон показывает в разделе «Восстановить», чтобы войти на нём в этот аккаунт.</string>
+    <string name="settings_copy_id_footer">Нажмите на ID, чтобы скопировать его.</string>
+    <string name="settings_change_photo">Сменить фото</string>
+    <string name="settings_remove_photo">Удалить фото</string>
+    <string name="settings_could_not_save_profile">Не удалось сохранить профиль</string>
+    <string name="settings_could_not_change_photo">Не удалось сменить фото</string>
+    <string name="settings_could_not_remove_photo">Не удалось удалить фото</string>
+    <string name="settings_agents_title">Агенты</string>
+    <string name="settings_agents_default">По умолчанию (%1$s)</string>
+    <string name="settings_agents_use_code_default">Значение из кода</string>
+    <string name="settings_agents_custom_model">Своя модель…</string>
+    <string name="settings_agents_enter_model_id">Введите точный ID модели</string>
+    <string name="settings_agents_no_machines">Нет подключённых машин</string>
+    <string name="settings_agents_no_machines_subtitle">Запустите Happy на компьютере, чтобы подключить его</string>
+    <string name="settings_agents_defaults">По умолчанию</string>
+    <string name="settings_agents_clear_overrides">Сбросить переопределения</string>
+    <string name="settings_agents_clear_overrides_subtitle">Вернуть всем агентам значения из кода</string>
+    <string name="settings_agents_permission">Разрешения</string>
+    <string name="settings_agents_model">Модель</string>
+    <string name="settings_agents_effort">Усилие</string>
+    <string name="settings_agents_custom_codex_title">Своя модель Codex</string>
+    <string name="settings_agents_custom_codex_message">Введите точный ID модели. Доступность зависит от вашего аккаунта Codex или настроек API.</string>
+    <string name="settings_commit">Коммит</string>
+    <string name="settings_commit_at">Коммит %1$s</string>
+    <string name="settings_manage_subscriptions">Управление подписками</string>
+    <string name="agent_settings_new_sessions_start">Новые сессии начинаются с</string>
+    <string name="agent_settings_new_sessions_last">Последней сессии</string>
+    <string name="agent_settings_new_sessions_default">Модели по умолчанию</string>
+    <string name="agent_settings_new_sessions_last_description">Модель и уровень усилий последней сессии, которую вы запустили.</string>
+    <string name="agent_settings_new_sessions_default_description">Модель и уровень усилий, выбранные ниже.</string>
+    <string name="agent_settings_default_model_last_description">Следует за последней запущенной сессией, на аккаунте, выбранном последним.</string>
+    <string name="agent_settings_default_model_default_description">Работает на аккаунте, выбранном последним в чате.</string>
+    <string name="agent_settings_default_effort">Усилия по умолчанию</string>
+    <string name="agent_settings_default_access">Доступ по умолчанию</string>
+    <string name="agent_settings_default_access_description">Что новая сессия может делать без вопросов. Сохраняется в вашем аккаунте и действует на всех ваших устройствах.</string>
+    <string name="agent_settings_new_sessions_unreadable">Не удалось загрузить модели. Проверьте подключение и откройте эту страницу снова.</string>
+    <string name="settings_analytics_not_saved">Аналитика пока выключена, но настройку не удалось сохранить. Она снова включится при следующем запуске Happy.</string>
+    <string name="settings_analytics_not_turned_on">Не удалось включить аналитику. Повторите попытку позже.</string>
+</resources>

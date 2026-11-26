@@ -1,0 +1,689 @@
+package com.slopus.happy.ui.session
+
+import android.graphics.Bitmap
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isDialog
+import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.isHeading
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.width
+import androidx.compose.ui.unit.height
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.slopus.happy.model.GitFileStatus
+import com.slopus.happy.model.GitFileStatusKind
+import com.slopus.happy.model.GitStatus
+import com.slopus.happy.model.GitStatusFiles
+import com.slopus.happy.model.HomeModelFixtures.cliAvailability
+import com.slopus.happy.model.HomeModelFixtures.machine
+import com.slopus.happy.model.HomeModelFixtures.machineMetadata
+import com.slopus.happy.model.HomeModelFixtures.metadata
+import com.slopus.happy.model.HomeModelFixtures.session
+import com.slopus.happy.model.Session
+import com.slopus.happy.model.SessionMetadata
+import com.slopus.happy.model.SessionState
+import com.slopus.happy.resume.ResumeOutcome
+import com.slopus.happy.resume.ResumeTexts
+import com.slopus.happy.sync.ComposerMirror
+import com.slopus.happy.sync.ForkOptions
+import com.slopus.happy.sync.ForkSource
+import com.slopus.happy.sync.OpResult
+import com.slopus.happy.sync.RewindPoint
+import com.slopus.happy.sync.RewindPointsResult
+import com.slopus.happy.sync.rigMetadataJson
+import com.slopus.happy.sync.SpawnSessionResult
+import com.slopus.happy.ui.PHONE
+import com.slopus.happy.ui.PHONE_WIDTH
+import com.slopus.happy.ui.assertActionsLabelled
+import com.slopus.happy.ui.assertDp
+import com.slopus.happy.ui.bounds
+import com.slopus.happy.ui.components.HeaderTags
+import com.slopus.happy.ui.components.ProfileHeaderTags
+import com.slopus.happy.ui.components.GlassSpec
+import com.slopus.happy.ui.hasRole
+import com.slopus.happy.ui.home.ArchiveResult
+import com.slopus.happy.ui.layout.ProvideWindowLayout
+import com.slopus.happy.ui.node
+import com.slopus.happy.ui.setHappyContent
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import com.slopus.happy.model.parseGitStatus
+import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+import java.time.ZoneOffset
+import java.io.File
+
+/**
+ * session/[id]/info.tsx: a centred title; loading and deleted states; quick
+ * actions in happy-app's order (changes, machine, resume, fork, duplicate,
+ * parent, archive, delete — fork and duplicate only with the experiment and
+ * an online machine, delete never for a bot); archive leaves on success and
+ * says why on failure; delete asks first; the ids copy; duplicate opens the
+ * rewind points newest first and forks up to the one picked.
+ */
+@RunWith(AndroidJUnit4::class)
+@Config(qualifiers = PHONE)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class SessionInfoScreenTest {
+    @get:Rule val rule = createComposeRule()
+
+    private class Fakes : SessionInfoControls, SessionContinuations {
+        val calls = mutableListOf<String>()
+        override suspend fun retryLoad() { calls += "retry" }
+        var archive: ArchiveResult = ArchiveResult.Archived
+        val points = listOf(
+            RewindPoint("u1", "first   question", 1_000.0),
+            RewindPoint("u2", "second question", 2_000.0),
+        )
+
+        /** What the worktree prompt is answered with; null: no worktree to ask about. */
+        var cleanupAnswer: Boolean? = null
+
+        override suspend fun archive(session: Session): ArchiveResult = archive.also { calls += "archive:${session.id}" }
+        override suspend fun leave(session: Session): ArchiveResult = archive.also { calls += "leave:${session.id}" }
+        override suspend fun cleanupWorktree(session: Session, confirm: suspend () -> Boolean) {
+            if (cleanupAnswer != null) calls += "cleanup:${confirm()}"
+        }
+        override suspend fun delete(session: Session): OpResult = OpResult(true).also { calls += "delete:${session.id}" }
+        override suspend fun resume(machineId: String, sessionId: String, metadata: SessionMetadata?, texts: ResumeTexts): ResumeOutcome =
+            ResumeOutcome.Resumed("resumed").also { calls += "resume" }
+        override suspend fun fork(source: ForkSource, options: ForkOptions): SpawnSessionResult {
+            calls += "fork:${options.cutAfterUuid}"
+            return SpawnSessionResult.Success("forked")
+        }
+        override suspend fun rewindPoints(source: ForkSource) = RewindPointsResult.Success(points)
+    }
+
+    private val online = machine("m1", machineMetadata { cliAvailability(claude = true) }, active = true)
+
+    private fun claudeSession(active: Boolean = true, extra: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit = {}) = session(
+        "session-0123456789-abcdef",
+        metadata = metadata(path = "/Users/dev/app") {
+            put("machineId", "m1")
+            put("claudeSessionId", "claude-0123456789-xyz")
+            putJsonObject("summary") { put("text", "Fix the build"); put("updatedAt", 0) }
+            extra()
+        },
+        active = active,
+    )
+
+    private val opened = mutableListOf<String>()
+    private val copied = mutableListOf<String>()
+    private var clipboardWorks = true
+    private var left = 0
+    private var successor: String? = null
+    private var archivedTo: String? = null
+    private var logs = emptyList<String>()
+    private val actions = SessionInfoActions(
+        onBack = {},
+        onOpenSession = { opened += it },
+        onOpenMachine = { opened += "machine:$it" },
+        onChanges = { opened += "changes:$it" },
+        onArchived = { archivedTo = it; left++ },
+        onDeleted = { left++ },
+        copyToClipboard = { copied += it; clipboardWorks },
+        tabSuccessor = { successor },
+        clientLogs = { logs },
+    )
+
+    private fun show(
+        session: Session?,
+        ready: Boolean = true,
+        experiments: Boolean = true,
+        fakes: Fakes = Fakes(),
+        debugBuild: Boolean = false,
+        live: SessionInfoLive = SessionInfoLive(),
+        permission: SessionInfoPermission? = null,
+    ) {
+        rule.setHappyContent {
+            SessionInfoScreen(session, ready, null, online, experiments, debugBuild, fakes, fakes, actions, zone = ZoneOffset.UTC, live = live, permission = permission)
+        }
+    }
+
+    private fun tagged(tag: String) = rule.onAllNodesWithTag(tag, useUnmergedTree = true)
+
+    @Test
+    fun loadingUntilTheFirstSync() {
+        show(null, ready = false)
+        rule.node(SessionInfoTags.LOADING).assertExists()
+    }
+
+    @Test
+    fun loadingKeepsTheSeededHeaderAndRetryRestartsTheWatchdogUntilDetailsArrive() {
+        val fakes = Fakes()
+        var ready by mutableStateOf(false)
+        rule.setHappyContent {
+            SessionInfoScreen(claudeSession(), ready, null, online, false, false, fakes, fakes, actions)
+        }
+        rule.mainClock.autoAdvance = false
+        rule.onNode(hasText("Fix the build") and hasAnyAncestor(hasTestTag(ProfileHeaderTags.NAME)), useUnmergedTree = true).assertExists()
+        assertDp("loading row", 56, rule.node(SessionInfoTags.LOADING).bounds.height)
+        rule.node(SessionInfoTags.RETRY).assertDoesNotExist()
+        rule.mainClock.advanceTimeBy(4_800)
+        rule.node(SessionInfoTags.RETRY).assertDoesNotExist()
+        rule.mainClock.advanceTimeBy(300)
+        rule.onNodeWithText("Session details are taking longer than expected").assertExists()
+        assertDp("retry row", 64, rule.node(SessionInfoTags.RETRY).bounds.height)
+        loadingShot("seeded-slow")
+        rule.node(SessionInfoTags.RETRY).performClick()
+        rule.mainClock.advanceTimeByFrame()
+        rule.node(SessionInfoTags.RETRY).assertDoesNotExist()
+        assertEquals(listOf("retry"), fakes.calls)
+        rule.mainClock.advanceTimeBy(5_100)
+        rule.node(SessionInfoTags.RETRY).assertExists()
+        rule.runOnIdle { ready = true }
+        rule.mainClock.autoAdvance = true
+        rule.waitForIdle()
+        rule.node(SessionInfoTags.LOADING).assertDoesNotExist()
+        rule.node(SessionInfoTags.CHANGES).assertExists()
+        rule.mainClock.advanceTimeBy(6_000)
+        rule.node(SessionInfoTags.RETRY).assertDoesNotExist()
+    }
+
+    @Test
+    fun timeInTheBackgroundDoesNotExpireTheFirstPaintWatchdog() {
+        val owner = object : LifecycleOwner {
+            val registry = LifecycleRegistry.createUnsafe(this).apply { currentState = Lifecycle.State.RESUMED }
+            override val lifecycle: Lifecycle get() = registry
+        }
+        val fakes = Fakes()
+        rule.setHappyContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) {
+                SessionInfoScreen(null, false, null, null, false, false, fakes, fakes, actions)
+            }
+        }
+        rule.mainClock.autoAdvance = false
+        rule.mainClock.advanceTimeBy(4_000)
+        rule.runOnIdle { owner.registry.currentState = Lifecycle.State.CREATED }
+        rule.mainClock.advanceTimeBy(10_000)
+        rule.node(SessionInfoTags.RETRY).assertDoesNotExist()
+        rule.runOnIdle { owner.registry.currentState = Lifecycle.State.RESUMED }
+        rule.mainClock.advanceTimeBy(4_800)
+        rule.node(SessionInfoTags.RETRY).assertDoesNotExist()
+        rule.mainClock.advanceTimeBy(300)
+        rule.node(SessionInfoTags.RETRY).assertExists()
+        loadingShot("slow-without-seed")
+    }
+
+    private fun loadingShot(name: String) {
+        val file = File("build/outputs/session-info-loading/$name.png")
+        file.parentFile?.mkdirs()
+        file.outputStream().use { rule.onRoot().captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
+    @Test
+    fun aLateSeedUpdatesTheHeaderWithoutPostponingRecovery() {
+        var seed by mutableStateOf<Session?>(null)
+        val fakes = Fakes()
+        rule.setHappyContent {
+            SessionInfoScreen(seed, false, null, null, false, false, fakes, fakes, actions)
+        }
+        rule.mainClock.autoAdvance = false
+        rule.mainClock.advanceTimeBy(4_000)
+        rule.runOnIdle { seed = claudeSession() }
+        rule.mainClock.advanceTimeBy(1_200)
+        rule.node(ProfileHeaderTags.AVATAR).assertExists()
+        rule.node(SessionInfoTags.RETRY).assertExists()
+    }
+
+    @Test
+    fun theDelayedCardUsesTheDarkThemeAndKeepsTheSeededProfile() {
+        val fakes = Fakes()
+        rule.setHappyContent(dark = true) {
+            SessionInfoScreen(claudeSession(), false, null, online, false, false, fakes, fakes, actions)
+        }
+        rule.mainClock.advanceTimeBy(5_100)
+        rule.node(ProfileHeaderTags.AVATAR).assertExists()
+        rule.node(SessionInfoTags.RETRY).assertExists()
+        loadingShot("seeded-slow-dark")
+    }
+
+    @Test
+    @Config(qualifiers = "w1280dp-h800dp-xhdpi")
+    fun theDelayedCardStaysInTheTabletsProfileColumn() {
+        val fakes = Fakes()
+        rule.setHappyContent {
+            ProvideWindowLayout(Modifier.fillMaxSize()) {
+                SessionInfoScreen(claudeSession(), false, null, online, false, false, fakes, fakes, actions)
+            }
+        }
+        rule.mainClock.advanceTimeBy(5_100)
+        val row = rule.node(SessionInfoTags.RETRY).bounds
+        val tiles = rule.onAllNodesWithTag(ProfileHeaderTags.TILE, useUnmergedTree = true)
+        assertEquals("card and tiles start together", tiles[0].bounds.left.value, row.left.value, 1f)
+        assertEquals("card and tiles end together", tiles[1].bounds.right.value, row.right.value, 1f)
+        assertTrue("card is capped", row.width < 800.dp)
+        loadingShot("seeded-slow-tablet-light")
+    }
+
+    private fun taskSession(canArchive: Boolean, canLeave: Boolean) = session(
+        "task-session",
+        metadata = SessionMetadata.parse(buildJsonObject {
+            rigMetadataJson(rpcMethods = if (canLeave) listOf("leaveTask") else emptyList()).forEach { (key, value) -> put(key, value) }
+            putJsonObject("task") { put("id", "task-1"); put("name", "Release notes"); put("canArchive", canArchive) }
+        })!!,
+    )
+
+    @Test
+    fun aTaskMemberCanLeaveWithoutDeletingOrCleaningUpItsConversation() {
+        val fakes = Fakes().apply { cleanupAnswer = true }
+        show(taskSession(canArchive = false, canLeave = true), fakes = fakes)
+        rule.node(SessionInfoTags.ARCHIVE).assertDoesNotExist()
+        rule.node(SessionInfoTags.DELETE).assertDoesNotExist()
+        rule.node(SessionInfoTags.DUPLICATE).assertDoesNotExist()
+        rule.node(SessionInfoTags.LEAVE_TASK).performScrollTo().performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("leave:task-session"), fakes.calls)
+        assertEquals(1, left)
+    }
+
+    @Test
+    fun taskArchiveRequiresItsExplicitPermissionAndKeepsTheConversation() {
+        val fakes = Fakes().apply { cleanupAnswer = true }
+        show(taskSession(canArchive = true, canLeave = false), fakes = fakes)
+        rule.node(SessionInfoTags.LEAVE_TASK).assertDoesNotExist()
+        rule.node(SessionInfoTags.DELETE).assertDoesNotExist()
+        rule.node(SessionInfoTags.ARCHIVE).performScrollTo().performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("archive:task-session"), fakes.calls)
+        assertEquals(1, left)
+    }
+
+    @Test
+    fun aSessionThatIsGoneSaysSo() {
+        show(null, ready = true)
+        rule.node(SessionInfoTags.DELETED).assertExists()
+    }
+
+    @Test
+    fun theProfileHeadUsesHomesAvatarAndShowsItsNameStatusAndTwoEqualTiles() {
+        show(claudeSession())
+        val bar = rule.node(HeaderTags.BAR).bounds
+        val avatar = rule.node(ProfileHeaderTags.AVATAR).bounds
+        val name = rule.node(ProfileHeaderTags.NAME).bounds
+        val subtitle = rule.node(ProfileHeaderTags.SUBTITLE).bounds
+        assertDp("avatar under feather", bar.bottom + GlassSpec.feather + 12.dp, avatar.top)
+        assertDp("avatar width", 88, avatar.width)
+        assertDp("avatar height", 88, avatar.height)
+        assertDp("avatar centred", (PHONE_WIDTH.dp - 88.dp) / 2, avatar.left)
+        assertDp("name gap", avatar.bottom + 14.dp, name.top)
+        assertDp("status gap", name.bottom + 2.dp, subtitle.top)
+        rule.onNode(hasText("Fix the build") and hasAnyAncestor(hasTestTag(ProfileHeaderTags.NAME)), useUnmergedTree = true).assertExists()
+        rule.node(ProfileHeaderTags.SUBTITLE).assert(hasText("online"))
+        val tiles = rule.onAllNodesWithTag(ProfileHeaderTags.TILE, useUnmergedTree = true)
+        tiles.assertCountEquals(2)
+        val model = tiles[0].bounds
+        val started = tiles[1].bounds
+        assertDp("tiles below status", subtitle.bottom + 24.dp, model.top)
+        assertDp("model tile height", 80, model.height)
+        assertDp("equal tile widths", model.width, started.width)
+        assertDp("tile gap", model.right + 10.dp, started.left)
+        assertDp("settings inset", 16, model.left)
+        rule.onAllNodesWithTag(ProfileHeaderTags.TILE)[0].assert(hasText("Model") and hasText("—"))
+        rule.onAllNodesWithTag(ProfileHeaderTags.TILE)[1].assert(hasText("Started"))
+        assertTrue("cards follow the tiles", rule.node(SessionInfoTags.CHANGES).bounds.top >= model.bottom)
+    }
+
+    @Test
+    @Config(qualifiers = "w1280dp-h800dp-xhdpi")
+    fun theProfileHeaderKeepsTheSettingsColumnOnAWideWindow() {
+        rule.setHappyContent {
+            ProvideWindowLayout { SessionInfoHeader(claudeSession(), null) }
+        }
+        val avatar = rule.node(ProfileHeaderTags.AVATAR).bounds
+        val tiles = rule.onAllNodesWithTag(ProfileHeaderTags.TILE, useUnmergedTree = true)
+        val first = tiles[0].bounds
+        val second = tiles[1].bounds
+        assertDp("avatar centred in the window", (1280.dp - 88.dp) / 2, avatar.left)
+        assertDp("800 column plus its inset", 256, first.left)
+        assertDp("column end inset", 1024, second.right)
+        assertDp("tiles share width", first.width, second.width)
+        assertDp("tiles keep their gap", first.right + 10.dp, second.left)
+    }
+
+    @Test
+    fun theBotProfileNamesItsKindAndItsPublishedModel() {
+        show(claudeSession {
+            putJsonObject("bot") {
+                put("id", "bot-1"); put("name", "Helper"); put("username", "helper")
+                put("workspaceId", "workspace-1"); put("orderKey", "a")
+            }
+            putJsonObject("client") { put("id", "rig"); put("name", "Happy Agent"); put("version", "test") }
+            put("currentModelCode", "GPT-6")
+        })
+        rule.onNode(hasText("Helper") and hasAnyAncestor(hasTestTag(ProfileHeaderTags.NAME)), useUnmergedTree = true).assertExists()
+        rule.node(ProfileHeaderTags.SUBTITLE).assert(hasText("Bot · online"))
+        rule.onAllNodesWithTag(ProfileHeaderTags.TILE)[0].assert(hasText("GPT-6"))
+    }
+
+    @Test
+    fun materialBarAndQuickActionsInOrder() {
+        show(claudeSession())
+        val bar = rule.node(HeaderTags.BAR).bounds
+        assertDp("header", 64, bar.bottom - bar.top)
+        // The Material bar every pushed screen has: the title at the start, after back.
+        val back = rule.node(HeaderTags.LEFT).bounds
+        val title = rule.node(HeaderTags.TITLE).bounds
+        assertTrue("title after back, at the start", title.left >= back.right && title.left < (PHONE_WIDTH / 4).dp)
+        rule.node(HeaderTags.TITLE).assert(hasText("Fix the build"))
+        val order = listOf(
+            SessionInfoTags.CHANGES, SessionInfoTags.MACHINE, SessionInfoTags.FORK, SessionInfoTags.DUPLICATE,
+            SessionInfoTags.ARCHIVE, SessionInfoTags.DELETE,
+        ).map { rule.node(it).bounds }
+        order.zipWithNext().forEach { (a, b) -> assertDp("rows stack", a.bottom, b.top) }
+        // Online: nothing to resume.
+        tagged(SessionInfoTags.RESUME).assertCountEquals(0)
+    }
+
+    @Test
+    fun theBranchFollowsPathTheLiveOneOverTheStartsAndIsLeftOutWithoutOne() {
+        // iOS 60158d2ac: the branch left the chat's header for its profile, after Path.
+        show(claudeSession { put("gitBranch", "main") }, live = SessionInfoLive(gitStatus = parseGitStatus("# branch.head feature/x", "", "", 1)))
+        rule.node(SessionInfoTags.BRANCH).assertExists()
+        rule.onNodeWithText("feature/x").assertExists()
+        rule.onNodeWithText("Branch").assertExists()
+        assertTrue("after Path", rule.node(SessionInfoTags.BRANCH).bounds.top >= rule.onNodeWithText("Path", useUnmergedTree = true).bounds.bottom)
+    }
+
+    @Test
+    fun withoutABranchThereIsNoRow() {
+        show(claudeSession())
+        tagged(SessionInfoTags.BRANCH).assertCountEquals(0)
+    }
+
+    private val askMode = com.slopus.happy.model.settings.ModeOption("default", "Default")
+    private val planMode = com.slopus.happy.model.settings.ModeOption("plan", "Plan")
+    private val modes = com.slopus.happy.chat.ComposerModes(availableModes = listOf(askMode, planMode), canChangePermission = true)
+
+    @Test
+    fun overItsChatThePermissionModeIsTheFirstCardAndPicksThroughTheChat() {
+        // iOS da5fda505: the chat's More menu left for its profile; the current mode is the row's value.
+        val picked = mutableListOf<String>()
+        show(claudeSession(), permission = SessionInfoPermission(modes) { field, option -> picked += "${field.name}:${option.key}" })
+        val row = rule.node(SessionInfoTags.PERMISSION_MODE).bounds
+        assertTrue("before quick actions", row.bottom <= rule.node(SessionInfoTags.CHANGES).bounds.top)
+        rule.onNodeWithText("Permission mode").assertExists()
+        rule.onNodeWithText("Default").assertExists()
+
+        rule.node(SessionInfoTags.PERMISSION_MODE).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Plan").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("PERMISSION_MODE:plan"), picked)
+    }
+
+    @Test
+    fun openedFromAnywhereElseThereIsNoPermissionRow() {
+        show(claudeSession())
+        tagged(SessionInfoTags.PERMISSION_MODE).assertCountEquals(0)
+    }
+
+    @Test
+    fun aLockedPermissionModeHasNoRow() {
+        show(claudeSession(), permission = SessionInfoPermission(modes.copy(canChangePermission = false)) { _, _ -> })
+        tagged(SessionInfoTags.PERMISSION_MODE).assertCountEquals(0)
+    }
+
+    @Test
+    fun forkAndDuplicateNeedTheExperiment() {
+        show(claudeSession(), experiments = false)
+        tagged(SessionInfoTags.FORK).assertCountEquals(0)
+        tagged(SessionInfoTags.DUPLICATE).assertCountEquals(0)
+    }
+
+    @Test
+    fun offlineSessionResumesAndShowsItsResumeCommand() {
+        val fakes = Fakes()
+        val offline = claudeSession(active = false)
+        rule.setHappyContent {
+            val machine = online.copy(metadata = machineMetadata { putJsonObject("resumeSupport") { put("rpcAvailable", true) } })
+            SessionInfoScreen(offline, true, null, machine, true, false, fakes, fakes, actions, zone = ZoneOffset.UTC)
+        }
+        rule.node(SessionInfoTags.RESUME).performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("resumed"), opened)
+        rule.node(SessionInfoTags.RESUME_COMMAND).performScrollTo().performClick()
+        assertEquals(listOf("cd '/Users/dev/app' && happy claude --resume claude-0123456789-xyz"), copied)
+    }
+
+    @Test
+    fun archiveLeavesOnSuccess() {
+        val fakes = Fakes()
+        show(claudeSession(), fakes = fakes)
+        rule.node(SessionInfoTags.ARCHIVE).performClick()
+        rule.waitForIdle()
+        assertEquals(1, left)
+    }
+
+    @Test
+    fun archiveHandsOverToTheNeighbouringTab() {
+        // Read on the press, before the archive takes the chat out of its checkout.
+        successor = "s-neighbour"
+        show(claudeSession())
+        rule.node(SessionInfoTags.ARCHIVE).performClick()
+        successor = null
+        rule.waitForIdle()
+        assertEquals("s-neighbour", archivedTo)
+    }
+
+    @Test
+    fun aCleanWorktreeIsOfferedForDeletionFirst() {
+        val fakes = Fakes().apply { cleanupAnswer = true }
+        show(claudeSession(), fakes = fakes)
+        rule.node(SessionInfoTags.ARCHIVE).performClick()
+        rule.onNodeWithText("Delete Worktree?").assertExists()
+        rule.onNodeWithText("The worktree has no uncommitted changes. Would you like to delete the worktree files?").assertExists()
+        assertTrue(fakes.calls.isEmpty())
+        rule.onNode(hasText("Delete Worktree") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("cleanup:true", "archive:session-0123456789-abcdef"), fakes.calls)
+
+        // Delete asks too, after its own confirmation; keeping the files still deletes the chat.
+        fakes.calls.clear()
+        rule.node(SessionInfoTags.DELETE).performClick()
+        rule.onNode(hasText("Delete Session") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        rule.onNode(hasText("Keep Files") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("cleanup:false", "delete:session-0123456789-abcdef"), fakes.calls)
+    }
+
+    @Test
+    fun copiesTheMetadataWithTheClientLogs() {
+        logs = listOf("10-16 12:00:00.000 I Happy: one", "10-16 12:00:01.000 W Happy: two")
+        show(claudeSession())
+        rule.node(SessionInfoTags.COPY_METADATA_AND_LOGS).performScrollTo().performClick()
+        rule.waitForIdle()
+        val text = copied.single()
+        assertTrue(text.startsWith("=== Session Metadata ===\n{\n"))
+        assertTrue(text.contains("\"claudeSessionId\": \"claude-0123456789-xyz\""))
+        assertTrue(text.endsWith("}\n\n=== Client Logs (2 entries) ===\n10-16 12:00:00.000 I Happy: one\n10-16 12:00:01.000 W Happy: two"))
+        rule.onNodeWithText("Session metadata copied to clipboard").assertExists()
+    }
+
+    @Test
+    fun aFailedArchiveSaysWhyAndStays() {
+        val failing = Fakes().apply { archive = ArchiveResult.Failed("agent gone", bot = false) }
+        show(claudeSession(), fakes = failing)
+        rule.node(SessionInfoTags.ARCHIVE).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("agent gone").assertExists()
+        assertEquals(0, left)
+    }
+
+    @Test
+    fun deleteAsksFirst() {
+        val fakes = Fakes()
+        show(claudeSession(), fakes = fakes)
+        rule.node(SessionInfoTags.DELETE).performClick()
+        rule.onNode(hasText("Delete Session") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("delete:session-0123456789-abcdef"), fakes.calls)
+        assertEquals(1, left)
+    }
+
+    @Test
+    fun aBotIsNeverOfferedDelete() {
+        val bot = claudeSession {
+            putJsonObject("bot") {
+                put("id", "b"); put("name", "Helper"); put("username", "helper"); put("workspaceId", "w"); put("orderKey", "a")
+                put("systemKey", kotlinx.serialization.json.JsonNull)
+            }
+        }
+        show(bot)
+        tagged(SessionInfoTags.DELETE).assertCountEquals(0)
+    }
+
+    @Test
+    fun idsCopyAndShowShortened() {
+        show(claudeSession())
+        rule.onNodeWithText("session-...9-abcdef").assertExists()
+        rule.node(SessionInfoTags.SESSION_ID).performScrollTo().performClick()
+        assertEquals(listOf("session-0123456789-abcdef"), copied)
+        rule.onNodeWithText("Happy Session ID copied to clipboard").assertExists()
+    }
+
+    /** info.tsx: a clipboard that refuses says so (sessionInfo.failedToCopy*), not "copied". */
+    @Test
+    fun aRefusedCopySaysSo() {
+        clipboardWorks = false
+        show(claudeSession())
+        rule.node(SessionInfoTags.SESSION_ID).performScrollTo().performClick()
+        rule.onNodeWithText("Failed to copy Happy Session ID").assertExists()
+        rule.onNodeWithText("Happy Session ID copied to clipboard").assertDoesNotExist()
+    }
+
+    @Test
+    fun duplicatePicksARewindPointNewestFirst() {
+        val fakes = Fakes()
+        show(claudeSession(), fakes = fakes)
+        rule.node(SessionInfoTags.DUPLICATE).performClick()
+        rule.waitForIdle()
+        rule.node(DuplicateSheetTags.SHEET).assertExists()
+        val rows = rule.onAllNodesWithTag(DuplicateSheetTags.ROW, useUnmergedTree = true)
+        rows.assertCountEquals(2)
+        rule.onNodeWithText("first question").assertExists()
+        rows[0].performClick()
+        rule.node(DuplicateSheetTags.CONFIRM).performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("fork:u2"), fakes.calls)
+        assertEquals(listOf("forked"), opened)
+        rule.onAllNodesWithTag(DuplicateSheetTags.SHEET, useUnmergedTree = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun duplicateSheetIsInsetAndCapped() {
+        show(claudeSession())
+        rule.node(SessionInfoTags.DUPLICATE).performClick()
+        rule.waitForIdle()
+        val sheet = rule.node(DuplicateSheetTags.SHEET).bounds
+        assertDp("16 in from each side", PHONE_WIDTH - 32, sheet.right - sheet.left)
+        assertTrue("no taller than 85% of the window", (sheet.bottom - sheet.top) <= (891 * 0.85f).dp)
+    }
+
+    @Test
+    fun debugBuildsShowTheRawJson() {
+        show(claudeSession(), debugBuild = true)
+        rule.node(SessionInfoTags.RAW_JSON).performScrollTo().assertExists()
+    }
+
+    @Test
+    fun rawJsonAsInfoTsxDumpsIt() {
+        val status = statusJson(SessionState.Waiting, "online")
+        assertEquals("""{"isConnected":true,"statusText":"online","statusColor":"#34C759","statusDotColor":"#34C759"}""", status.toString())
+        assertEquals(true, (statusJson(SessionState.Thinking, "vibing…")["isPulsing"] as JsonPrimitive).boolean)
+        val offline = claudeSession(active = false).copy(activeAt = 42)
+        val json = sessionJson(offline, null, ComposerMirror(permissionMode = "plan", modelMode = "opus", draft = "half"))
+        assertEquals(42L, json["presence"]!!.jsonPrimitive.long)
+        assertEquals("plan", json["permissionMode"]!!.jsonPrimitive.content)
+        assertEquals("opus", json["modelMode"]!!.jsonPrimitive.content)
+        assertEquals("half", json["draft"]!!.jsonPrimitive.content)
+        assertEquals(JsonNull, json["agentState"])
+        assertEquals("online", sessionJson(claudeSession(), null)["presence"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun liveGitCountsForACliSession() {
+        val files = GitStatusFiles(
+            stagedFiles = listOf(GitFileStatus("a.kt", "", "a.kt", GitFileStatusKind.Modified, true, 1, 0)),
+            unstagedFiles = listOf(
+                GitFileStatus("a.kt", "", "a.kt", GitFileStatusKind.Modified, false, 2, 0),
+                GitFileStatus("b.kt", "", "b.kt", GitFileStatusKind.Modified, false, 0, 0),
+            ),
+            branch = "main",
+        )
+        val status = GitStatus(
+            branch = "main", isDirty = true, modifiedCount = 2, untrackedCount = 0, stagedCount = 1, lastUpdatedAt = 1,
+            stagedLinesAdded = 0, stagedLinesRemoved = 0, unstagedLinesAdded = 0, unstagedLinesRemoved = 0,
+            linesAdded = 1200, linesRemoved = 0, linesChanged = 1200,
+        )
+        show(claudeSession(), live = SessionInfoLive(gitStatus = status, gitStatusFiles = files))
+        // Two files (a.kt counted once); +1.2k, and no "-0".
+        rule.onNodeWithText("2 changed files", useUnmergedTree = true).assertExists()
+        rule.onNodeWithText("+1.2k", useUnmergedTree = true).assertExists()
+        rule.onAllNodesWithText("-0", useUnmergedTree = true).assertCountEquals(0)
+        rule.onAllNodesWithText("≈", useUnmergedTree = true).assertCountEquals(0)
+    }
+
+    /**
+     * TalkBack over session info: the session's name is a header, the quick
+     * actions are buttons, and a read-only row is one stop that reads its
+     * title with its value. Nothing actionable goes unnamed.
+     */
+    @Test
+    fun sessionInfoReadsForTalkBack() {
+        show(claudeSession(), live = SessionInfoLive(composer = ComposerMirror(permissionMode = "bypassPermissions")))
+        rule.onNode(hasText("Fix the build") and isHeading() and hasAnyAncestor(hasTestTag(ProfileHeaderTags.NAME)), useUnmergedTree = true).assertExists()
+        rule.onNode(hasText("Changes") and hasRole(Role.Button)).assertExists()
+        rule.onNodeWithTag(SessionInfoTags.SKIP_PERMISSIONS).performScrollTo()
+            .assert(hasText("Dangerously Skip Permissions") and hasText("Enabled"))
+        rule.assertActionsLabelled()
+    }
+
+    @Test
+    fun aBypassingSessionSkipsPermissions() {
+        show(claudeSession(), live = SessionInfoLive(composer = ComposerMirror(permissionMode = "bypassPermissions")))
+        rule.onNodeWithText("Dangerously Skip Permissions").performScrollTo()
+        rule.onNode(hasText("Enabled") and hasAnyAncestor(hasTestTag(SessionInfoTags.SKIP_PERMISSIONS)), useUnmergedTree = true).assertExists()
+    }
+
+    @Test
+    fun rewindPreviewCollapsesAndCuts() {
+        assertEquals("a b", rewindPreview("  a \n b "))
+        assertEquals("x".repeat(140) + "…", rewindPreview("x".repeat(200)))
+    }
+}
