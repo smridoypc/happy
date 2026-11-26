@@ -1228,13 +1228,13 @@ public actor Conversation {
     /// `attachments` by the previews' ids.
     public func prepared(_ id: String, _ attachments: [String: OutgoingAttachment]) async {
         guard let previews = held.removeValue(forKey: id), let index = outgoing.firstIndex(where: { $0.id == id }) else { return }
-        let attachments = previews.compactMap { attachments[$0.id] }
+        let resolved = previews.compactMap { attachments[$0.id] }
         // The previews' rings; the pictures' own start again under their keys.
         UploadProgressBoard.shared.clear(message: id)
         var inline = outgoing[index].pictures
         var files = outgoingFiles[id] ?? []
         do {
-            try stage(attachments, id: id, inline: &inline, files: &files)
+            try stage(resolved, id: id, inline: &inline, files: &files)
         } catch {
             failed(id, Store.describe(error))
             return

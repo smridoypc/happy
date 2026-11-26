@@ -143,7 +143,7 @@ final class GenUITextElement: GenUIElement {
     }
 
     override func baseline(_ width: CGFloat) -> CGFloat {
-        let style = environment.map { style.scaled($0.scale) } ?? style
+        let style = environment.map { self.style.scaled($0.scale) } ?? self.style
         guard let line = style.lineHeight else { return ceil(font.ascender) }
         return line - abs(font.descender) - (line - font.lineHeight) / 4
     }

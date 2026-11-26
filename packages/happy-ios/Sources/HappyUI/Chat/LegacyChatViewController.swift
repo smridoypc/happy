@@ -1331,9 +1331,9 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
             navigation.delegate?.navigationController?(navigation, didShow: self, animated: false)
         }
         let generation = chatGeneration
-        let seed = services.seed
+        let loadSeed = services.seed
         connectionTask = Task { [weak self] in
-            let seed = await Task.detached(priority: .userInitiated) { seed() }.value
+            let seed = await Task.detached(priority: .userInitiated) { loadSeed() }.value
             guard let self, !Task.isCancelled, self.chatGeneration == generation,
                   self.context.account.session === self.account else { return }
             UIView.performWithoutAnimation {
