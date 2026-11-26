@@ -3,21 +3,33 @@ import Foundation
 import HappyAnalytics
 import HappyCore
 import HappyUI
+import HappyWire
 import UIKit
 
-/// Builds the real dependencies: credentials in expo-secure-store's Keychain
-/// item, the server setting and the account's local settings in their own
-/// defaults suites, and account stores in Application Support.
+/// Offline demo composition: cuts every real network transport and keychain
+/// dependency, routing all REST, SSE, and asset calls into `DemoAgentServer`.
 @MainActor
 enum CompositionRoot {
     static func makeContext(bundle: Bundle = .main) -> AppContext {
         let variant = AppVariant.current(bundle: bundle)
         let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
-        let account = NativeAccountFactory.make(
-            version: version,
-            directory: storeDirectory(),
-            // No namespace on iOS: retain the exact RN-compatible items.
-            backend: SecurityKeychainBackend(),
+        let serverStorage = InMemoryKeyValueStore()
+        let localStorage = InMemoryKeyValueStore()
+        let credentialStore = InMemoryCredentialStore()
+        let account = AccountController(
+            serverConfig: ServerConfig(storage: serverStorage),
+            clientID: HappyClientID.make(version: version),
+            credentialStore: credentialStore,
+            storeDirectory: nil,
+            localSettings: localStorage,
+            accountCredentialStore: InMemoryAccountCredentialStore(sharedStore: credentialStore),
+            agentConnectionCredentialStore: InMemoryAgentConnectionCredentialStore(),
+            agentTransport: { creds in
+                creds.signIn != nil ? DemoAgentServer.cloud : DemoAgentServer.localMac
+            },
+            localSettingsFactory: { _ in InMemoryKeyValueStore() },
+            transport: DemoOfflineHTTPTransport(),
+            connector: DemoOfflineWebSocketConnector(),
             appState: {
                 await MainActor.run {
                     UIApplication.shared.applicationState == .background ? "background" : "active"
@@ -27,9 +39,10 @@ enum CompositionRoot {
                 await MainActor.run {
                     if active { DeliveryLease.shared.acquire() } else { DeliveryLease.shared.release() }
                 }
-            }
+            },
+            pushUnregisterStore: InMemoryPushUnregisterStore()
         )
-        account.agentConnections.startup = startup
+        account.localSettings.devModeEnabled = true
         account.agentConnections.streamHold = { expired in
             await MainActor.run { () -> (@Sendable () async -> Void)? in
                 let lease = EventStreamLease(expired: expired)
@@ -37,9 +50,37 @@ enum CompositionRoot {
                 return { await lease.end() }
             }
         }
-        startAnalytics(bundle: bundle, variant: variant, version: version)
         let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
         return AppContext(account: account, variant: variant, version: version, build: build)
+    }
+
+    static func seedDemo(_ account: AccountController) async {
+        guard account.agentConnections.accounts.isEmpty else { return }
+        let macCreds = AgentConnectionCredentials(
+            address: "127.0.0.1",
+            port: 1,
+            deviceID: "demo-mac",
+            deviceToken: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        )
+        _ = try? await account.agentConnections.add(macCreds, name: "Ridoy's Mac (Demo)")
+
+        let server = HappyCloud.server(named: "acme")
+        if let origin = try? AgentOrigin(server) {
+            let signIn = ServerSignInRecord(
+                method: HappyCloud.method(server: server),
+                grant: OAuthGrant(clientId: "happy", audience: server),
+                userId: "ridoy"
+            )
+            let access = OAuthAccess(token: "demo-token", expiresAt: .distantFuture)
+            _ = try? await account.agentConnections.addServer(
+                origin,
+                signIn: signIn,
+                access: access,
+                name: "Acme Cloud (Demo)",
+                instanceId: "demo-cloud-1",
+                select: true
+            )
+        }
     }
 
     private static func startAnalytics(bundle: Bundle, variant: AppVariant, version: String) {
